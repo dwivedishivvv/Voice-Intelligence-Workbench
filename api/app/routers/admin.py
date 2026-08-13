@@ -1,9 +1,12 @@
+from typing import get_args
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from common import db, speaker as sc
 from common.config import (get_settings, get_effective_settings, config_snapshot,
-                            Settings, TUNABLE_FIELDS, SETTINGS_CATEGORIES)
+                            Settings, TUNABLE_FIELDS, RESTART_TUNABLE_FIELDS,
+                            SETTINGS_CATEGORIES)
 from ..auth import get_current_user
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
@@ -39,8 +42,13 @@ async def get_settings_view(user=Depends(get_current_user)):
 
     def restart_field(name: str):
         pending = override_rows.get(name)
+        ann = Settings.model_fields[name].annotation
         return {"key": name, "value": getattr(defaults, name),
-                "pending": pending["value"] if pending else None}
+                "pending": pending["value"] if pending else None,
+                "editable": name in RESTART_TUNABLE_FIELDS,
+                # Literal fields carry their own allowed values — hand them to the UI so it
+                # can offer a picker instead of a free-text box that can only be got wrong.
+                "options": list(get_args(ann)) or None}
 
     return {
         "categories": [{"name": cat, "fields": [field(k) for k in keys]}
@@ -55,7 +63,7 @@ class SettingsPatch(BaseModel):
 
 @router.patch("/settings")
 async def patch_settings(body: SettingsPatch, user=Depends(get_current_user)):
-    unknown = set(body.values) - TUNABLE_FIELDS
+    unknown = set(body.values) - TUNABLE_FIELDS - RESTART_TUNABLE_FIELDS
     if unknown:
         raise HTTPException(400, f"not tunable: {sorted(unknown)}")
     for key, value in body.values.items():

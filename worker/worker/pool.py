@@ -10,6 +10,13 @@ from .ctx import SR
 
 
 def resolve_device(cfg) -> str:
+    # cuda is selectable from the Settings page, where the person choosing it can't see
+    # whether this worker's host actually has a usable GPU. Falling back beats every model
+    # load in the pool failing at once on a machine that simply doesn't have one.
+    if cfg.device == "cuda" and not torch.cuda.is_available():
+        import structlog
+        structlog.get_logger().warning("cuda_unavailable_falling_back_to_cpu")
+        return "cpu"
     if cfg.device in ("cpu", "cuda"):
         return cfg.device
     return "cuda" if torch.cuda.is_available() else "cpu"
@@ -67,8 +74,14 @@ class ModelPool:
             self.diar._segmentation.step = self.diar._segmentation.duration * 0.5
 
         embed_dir = str(md / "embed" / self.cfg.embed_model)
+        # speechbrain defaults to LocalStrategy.SYMLINK when linking the hub cache into
+        # savedir, which is fatal on Windows: creating a symlink needs admin or developer
+        # mode, otherwise WinError 1314. Copying costs a few MB and works everywhere, so
+        # it's not worth branching on os.name.
+        from speechbrain.utils.fetching import LocalStrategy
         self.embedder = EncoderClassifier.from_hparams(
-            source=embed_dir, savedir=embed_dir, run_opts={"device": self.device})
+            source=embed_dir, savedir=embed_dir, run_opts={"device": self.device},
+            local_strategy=LocalStrategy.COPY)
 
         self.text_embedder = SentenceTransformer(
             str(md / "text" / self.cfg.text_embed_model), device=self.device)

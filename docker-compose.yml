@@ -39,10 +39,10 @@ services:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
     volumes:
-      - C:/data:/data
+      - ./.runtime/data:/data
       - ./api/app:/app/api/app
       - ./common:/app/common
-      - C:/models:/models
+      - ./.runtime/models:/models
       - ./.hf_token:/app/.hf_token:ro
     ports: ["8000:8000"]
     healthcheck:
@@ -60,7 +60,7 @@ services:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
     volumes:
-      - C:/data:/data
+      - ./.runtime/data:/data
 
   web:
     <<: *common

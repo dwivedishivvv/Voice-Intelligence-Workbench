@@ -25,6 +25,39 @@ make test
 
 Then: API on `:8000`, web on `:5173`, Postgres on `:5432`.
 
+### Running natively on Windows
+
+`scripts/dev.ps1` runs the Python side on the host and leaves Postgres/Redis in Docker —
+faster to iterate on, and the only way the worker can reach a local GPU. One terminal each:
+
+```powershell
+.\scripts\dev.ps1 infra     # postgres + redis, waits for healthy
+.\scripts\dev.ps1 api       # uvicorn on :8000
+.\scripts\dev.ps1 worker    # arq worker
+.\scripts\dev.ps1 web       # vite on :5174
+```
+
+First run needs two venvs — **Python 3.11 specifically**, since torch 2.4 and numpy 1.26
+publish no 3.13 wheels:
+
+```powershell
+uv venv --python 3.11 .venv;        $env:VIRTUAL_ENV=".venv";        uv pip install -r api/pyproject.toml
+uv venv --python 3.11 .venv-worker; $env:VIRTUAL_ENV=".venv-worker"; uv pip install -r worker/pyproject.toml
+cd web; npm install; cd ..
+```
+
+Two Windows-specific notes. Models land in `C:\models`, not `.runtime/models` —
+`models/REGISTRY.yaml` hardcodes absolute `/models/...` paths, which resolve to `C:\models`
+on Windows, and the script points `MODEL_DIR` there so downloads and `verify_models()` agree.
+And creating symlinks needs admin or Developer Mode, so anything that would symlink the
+Hugging Face cache copies instead (`WinError 1314` is the symptom when it doesn't).
+
+The web UI reads its API key from `localStorage`. Once, in the browser console:
+
+```js
+localStorage.setItem("api_key", "<API_KEY from .env>")
+```
+
 ## Offline verification
 
 ```bash

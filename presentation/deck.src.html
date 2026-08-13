@@ -1,0 +1,718 @@
+<title>The Silent Co-Driver</title>
+<style>
+  :root {
+    --ground: #0A0C10;
+    --panel: #12161C;
+    --panel-2: #171D25;
+    --line: #232A33;
+    --text: #E7EBEF;
+    --muted: #8A96A4;
+    --dim: #5D6874;
+    --red: #E8112D;
+    --calm: #00C46A;
+    --tired: #FFB020;
+    --stressed: #FF4438;
+
+    --display: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    --body: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+
+    --col: 70ch;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--text);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── timing-tower rail + content column ───────────────────────────── */
+  .slide {
+    display: grid;
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 0 28px;
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 68px 32px;
+    border-top: 1px solid var(--line);
+  }
+  .slide:first-of-type { border-top: 0; }
+
+  .rail {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color: var(--dim);
+    letter-spacing: 0.06em;
+    padding-top: 6px;
+    border-right: 1px solid var(--line);
+    text-align: right;
+    padding-right: 20px;
+  }
+  .rail b {
+    display: block;
+    font-size: 26px;
+    font-weight: 800;
+    color: var(--red);
+    line-height: 1;
+    letter-spacing: -0.02em;
+  }
+  .rail span { display: block; margin-top: 8px; font-size: 11px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--red);
+    margin: 0 0 12px;
+  }
+
+  h1, h2 {
+    font-family: var(--display);
+    font-style: italic;
+    text-transform: uppercase;
+    font-weight: 800;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+    margin: 0 0 18px;
+    line-height: 1.02;
+  }
+  h1 { font-size: clamp(38px, 7vw, 72px); }
+  h2 { font-size: clamp(27px, 4vw, 40px); }
+
+  h3 {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    margin: 34px 0 12px;
+  }
+
+  p { margin: 0 0 16px; max-width: var(--col); }
+  .lede { font-size: 20px; line-height: 1.5; color: var(--text); max-width: 62ch; }
+  .muted { color: var(--muted); }
+
+  strong { color: #fff; font-weight: 650; }
+  em.term { font-style: normal; color: var(--red); font-weight: 600; }
+
+  ul { margin: 0 0 16px; padding-left: 0; list-style: none; max-width: var(--col); }
+  ul li {
+    position: relative;
+    padding-left: 22px;
+    margin-bottom: 9px;
+  }
+  ul li::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 10px;
+    width: 9px; height: 9px;
+    background: var(--red);
+  }
+  ul.plain li::before { background: var(--dim); width: 6px; height: 6px; top: 12px; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: #C9D3DE;
+  }
+
+  /* ── figures ──────────────────────────────────────────────────────── */
+  figure {
+    margin: 26px 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--panel);
+  }
+  figure img { display: block; width: 100%; height: auto; }
+  figcaption {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    padding: 11px 14px;
+    border-top: 1px solid var(--line);
+    background: var(--panel-2);
+  }
+
+  /* ── speaker note ─────────────────────────────────────────────────── */
+  .say {
+    margin: 24px 0 0;
+    padding: 16px 18px;
+    background: var(--panel);
+    border-left: 3px solid var(--red);
+    border-radius: 0 6px 6px 0;
+    max-width: var(--col);
+  }
+  .say p { margin: 0; font-size: 15.5px; line-height: 1.62; color: #C9D3DE; }
+  .say p + p { margin-top: 10px; }
+  .say-label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--red);
+    display: block;
+    margin-bottom: 8px;
+  }
+
+  /* ── data tables / spec grids ─────────────────────────────────────── */
+  .scroll { overflow-x: auto; margin: 18px 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 14.5px;
+    min-width: 480px;
+  }
+  th, td {
+    text-align: left;
+    padding: 9px 14px 9px 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  td.k { font-family: var(--mono); color: #C9D3DE; white-space: nowrap; font-size: 13.5px; }
+  td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+
+  /* ── pipeline strip ───────────────────────────────────────────────── */
+  .pipe { display: flex; flex-wrap: wrap; gap: 6px; margin: 20px 0 8px; }
+  .pipe span {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    padding: 7px 11px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: #C9D3DE;
+    white-space: nowrap;
+  }
+  .pipe span b { color: var(--red); font-weight: 700; }
+
+  /* ── mood key ─────────────────────────────────────────────────────── */
+  .key { display: flex; flex-wrap: wrap; gap: 20px; margin: 16px 0 4px; font-family: var(--mono); font-size: 13px; }
+  .key i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: baseline; }
+  .key .c { background: var(--calm); }
+  .key .s { background: var(--stressed); }
+  .key .t { background: var(--tired); }
+
+  /* ── hero ─────────────────────────────────────────────────────────── */
+  .hero { padding-top: 84px; padding-bottom: 40px; }
+  .hero .tagline {
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-bottom: 30px;
+  }
+  #trace { display: block; width: 100%; height: 132px; margin: 30px 0 10px; }
+  .trace-cap {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--dim);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 26px 0 4px;
+  }
+  .stat { background: var(--panel); padding: 15px 16px; }
+  .stat b {
+    display: block;
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 25px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+  .stat span {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 5px;
+  }
+
+  .callout {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--tired);
+    background: var(--panel);
+    padding: 16px 18px;
+    border-radius: 0 6px 6px 0;
+    margin: 22px 0;
+    max-width: var(--col);
+  }
+  .callout p:last-child { margin-bottom: 0; }
+
+  a { color: var(--red); }
+  :focus-visible { outline: 2px solid var(--red); outline-offset: 3px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  @media (max-width: 720px) {
+    .slide { grid-template-columns: 1fr; gap: 0; padding: 44px 20px; }
+    .rail {
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      padding: 0 0 12px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+    .rail b { display: inline; font-size: 20px; }
+    .rail span { margin-top: 0; }
+    body { font-size: 16px; }
+  }
+</style>
+
+<!-- ══════════════════════════════════════ 01 ══════════════════════════ -->
+<section class="slide hero">
+  <div class="rail"><b>01</b><span>TITLE</span></div>
+  <div>
+    <p class="eyebrow">Problem Statement 01 · The Silent Co-Driver</p>
+    <h1>Nobody has time<br>to hear it.</h1>
+    <p class="tagline">SPEAKER WORKBENCH — INTELLIGENCE SUITE</p>
+    <p class="lede">A race engineer reads twenty channels of telemetry and listens to none of them.
+      We built the channel that was missing: the driver's own voice, transcribed, read for tone,
+      and pinned to the lap it happened on.</p>
+
+    <canvas id="trace" aria-label="Lando Norris lap times, Australian Grand Prix 2024 — 58 laps, with three pit stops and one stressed radio call marked"></canvas>
+    <div class="trace-cap">
+      <span>NOR · AUSTRALIA 2024 · 58 LAPS</span>
+      <span>REAL TELEMETRY — OPENF1</span>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat"><b>9</b><span>Pipeline stages</span></div>
+      <div class="stat"><b>5</b><span>Models, offline</span></div>
+      <div class="stat"><b>22</b><span>Radio calls, live</span></div>
+      <div class="stat"><b>0</b><span>Cloud calls</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 02 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>02</b><span>PROBLEM</span></div>
+  <div>
+    <p class="eyebrow">The gap</p>
+    <h2>Telemetry has no word for "he sounds done"</h2>
+
+    <p>Every input a race engineer trusts is numeric. Tyre temps, fuel delta, sector times —
+      all of it plotted, thresholded, alarmed. The driver's radio is the one channel that carries
+      state no sensor measures: confusion, fatigue, the edge in the voice two laps before the mistake.</p>
+
+    <p>It's also the one channel nobody processes. It arrives as audio, mid-race, when the engineer
+      is busy. It gets heard once, in the moment, by someone with no attention to spare — and then
+      it's gone. <strong>The signal exists. It just never becomes data.</strong></p>
+
+    <h3>What the brief asked for</h3>
+    <ul>
+      <li>Upload or play a driver radio clip</li>
+      <li>Speech converted to readable text</li>
+      <li>Tone analysed — calm, stressed or tired</li>
+      <li>Shown next to lap times, so stress lines up with slower laps</li>
+    </ul>
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"Open with the asymmetry. An F1 team measures everything about the car and nothing about
+        the driver's state — except the one channel that's full of it, which they throw away.
+        We're not adding a sensor. We're reading the one they already have."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 03 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>03</b><span>DEMO</span></div>
+  <div>
+    <p class="eyebrow">Live, on real race data</p>
+    <h2>Melbourne 2024, Lando Norris, 22 radio calls</h2>
+
+    <p>No sample files, no staged clips. Race Radio pulls the session list, driver list, lap times
+      and team radio straight from <strong>OpenF1</strong>, then pulls the actual broadcast audio from
+      Formula 1's own livetiming host. Pick a year, a race, a driver — the picker sorts drivers by how
+      many radio calls exist, so you never land on one with none.</p>
+
+    <p>Hit <em class="term">Transcribe &amp; analyse</em> and the clip goes through the same pipeline as
+      any other audio in the system. The result comes back over a websocket: the words, a tone read,
+      and a coloured bar on the lap chart at the lap that call landed on.</p>
+
+    {{IMG:race-radio-viewport|Race Radio after five of Norris's calls were analysed. Bars are lap times; colour is the tone read on the call nearest that lap.}}
+
+    <div class="key">
+      <span><i class="c"></i>calm</span>
+      <span><i class="s"></i>stressed</span>
+      <span><i class="t"></i>tired</span>
+    </div>
+
+    <p class="muted" style="margin-top:16px">Two transcripts from that run, verbatim:
+      <em class="term">"It sounded like as per P2 at the minute. Understood. As per P2."</em> and
+      <em class="term">"Bueno, sí, gracias."</em> — the second one matters: the ASR is multilingual
+      and auto-detects, which team radio needs badly.</p>
+
+    <div class="callout">
+      <p><strong>And the honest read of this run.</strong> Five calls, four laps. Two came back
+        stressed, on laps 7 and 8 — and the lap times there were 1:22.744 and 1:22.630, against
+        1:22.632 on the calm lap before them. <strong>No slowdown.</strong> On a five-call sample
+        the stress read did not predict pace, and we're showing you that rather than cropping it.</p>
+      <p>That's the instrument working correctly: it surfaced a signal, the signal was checkable,
+        and this time it didn't pay off. The question the brief poses only becomes answerable across
+        a season of calls — which is precisely what nobody can do by ear, and what this makes possible.</p>
+    </div>
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"This is live against the 2024 Australian Grand Prix. I picked Norris because he has 22
+        recorded calls in that session. I'll analyse one now — it takes about twenty-five seconds
+        on this laptop's CPU, no GPU, no internet beyond the F1 audio itself."</p>
+      <p>"Watch the lap chart when it finishes. That bar changes colour. That's the whole idea:
+        the tone read lands on the lap, next to the lap time."</p>
+      <p><strong>If a judge does the arithmetic:</strong> get there first. "You'll notice the two
+        stressed calls didn't cost him any lap time. Five calls is not a study. What we've built is
+        the thing that makes it a study — every call in a season, read the same way."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 04 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>04</b><span>PIPELINE</span></div>
+  <div>
+    <p class="eyebrow">Under the hood</p>
+    <h2>Nine stages, every one resumable</h2>
+
+    <p>A clip isn't "sent to an API". It moves through nine named stages, each writing its own rows
+      and emitting its own progress event. If one rejects — too short, no speech, corrupt container —
+      it fails with a reason code, not a stack trace.</p>
+
+    <div class="pipe">
+      <span><b>1</b> VALIDATING</span>
+      <span><b>2</b> PREPROCESSING</span>
+      <span><b>3</b> TRANSCRIBING</span>
+      <span><b>4</b> DIARIZING</span>
+      <span><b>5</b> RECONCILING</span>
+      <span><b>6</b> EMBEDDING</span>
+      <span><b>7</b> IDENTIFYING</span>
+      <span><b>8</b> POSTPROCESSING</span>
+      <span><b>9</b> INDEXING</span>
+    </div>
+
+    <h3>What each one actually does</h3>
+    <div class="scroll">
+      <table>
+        <tr><td class="k">PREPROCESSING</td><td>High-pass at 70&nbsp;Hz, spectral denoise, EBU&nbsp;R128 loudness normalise to −23&nbsp;LUFS, then voice-activity detection. Radio audio is compressed, clipped and noisy — this is why the transcript is readable at all.</td></tr>
+        <tr><td class="k">TRANSCRIBING</td><td>Whisper large-v3-turbo with word-level timestamps and per-token logprobs. Language auto-detected.</td></tr>
+        <tr><td class="k">DIARIZING</td><td>pyannote 3.1 splits the audio by speaker — driver vs. engineer on the same channel.</td></tr>
+        <tr><td class="k">RECONCILING</td><td>Snaps speaker turns to word boundaries, so a speaker change never lands mid-word.</td></tr>
+        <tr><td class="k">IDENTIFYING</td><td>ECAPA voice embeddings matched against enrolled profiles by cosine similarity, with a margin test so a near-tie returns "unknown" instead of guessing.</td></tr>
+        <tr><td class="k">INDEXING</td><td>Every utterance embedded into pgvector for semantic search across the whole archive.</td></tr>
+      </table>
+    </div>
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"The preprocessing stage is the unglamorous one that makes the rest work. Team radio is
+        heavily compressed and clipped. Feed it to Whisper raw and you get mush. Normalise the
+        loudness and gate the silence first and you get sentences."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 05 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>05</b><span>TONE</span></div>
+  <div>
+    <p class="eyebrow">The stress read — and its honest limits</p>
+    <h2>Calibrated per driver, not against a global threshold</h2>
+
+    <p>Tone comes from four acoustic features: <strong>speech rate</strong>, <strong>mean pitch</strong>,
+      <strong>pitch variability</strong> and <strong>voiced ratio</strong>. Rate and F0 are the two
+      features most consistently tied to vocal stress in the speech literature, and both survive
+      a noisy radio channel better than spectral detail does.</p>
+
+    <p>The part we're proud of is the baseline. A fixed pitch cutoff is meaningless across drivers —
+      a naturally high voice would read permanently stressed. So each driver gets a rolling baseline
+      built from their own calm calls in that session, an exponential moving average that resists a
+      single noisy sample. After three calm samples, the classifier switches from absolute thresholds
+      to <strong>relative to this driver, today</strong>: 45% faster than their own norm reads stressed,
+      45% slower with flattened pitch reads tired.</p>
+
+    <div class="callout">
+      <p><strong>We are not going to oversell this.</strong> It's a transparent heuristic over
+        interpretable features — not a trained speech-emotion model. It gives a directional read and
+        an auditable reason, and every threshold is visible and tunable in the UI. Swapping in a
+        trained SER model is a registry entry and a stage edit; the plumbing around it is the hard
+        part, and that part is done.</p>
+    </div>
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"If a judge asks 'is this real emotion detection?' — answer it head-on. It's a heuristic on
+        rate and pitch, calibrated per driver. That honesty is a feature: the thresholds are on screen
+        and adjustable, so an engineer can tune it to their driver instead of trusting a black box."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 06 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>06</b><span>DEPTH</span></div>
+  <div>
+    <p class="eyebrow">Beyond the brief</p>
+    <h2>The radio page is one view of a full workbench</h2>
+
+    <p>The problem statement asks for a clip, a transcript, a tone read and a lap chart. We built the
+      system that makes those four things trustworthy — and the same engine serves every other audio
+      workflow behind it.</p>
+
+    {{IMG:clip-detail|Any clip: waveform with speaker regions, per-speaker talk share and reliability, and the diarized transcript. Original and processed audio are both playable.}}
+
+    <p>Upload anything and you get the same treatment: a quality grade with the reason attached
+      (SNR, clipping ratio, bandwidth), speaker separation, and exports in
+      <code>SRT</code>, <code>VTT</code>, <code>TXT</code>, <code>JSON</code> and <code>RTTM</code>.</p>
+
+    {{IMG:speakers|Speaker profiles. Enrol a voice once and every later clip identifies it automatically — with a confidence score and an explicit "unknown" when the match is too close to call.}}
+
+    <p>There's also a <strong>Live</strong> mode: speak into the mic and chunks are cut on your next
+      natural pause rather than a fixed timer, so words never split mid-sentence. Language locks per
+      session and re-checks periodically, so genuine code-switching is caught without the transcript
+      flip-flopping every chunk.</p>
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"Worth thirty seconds, not more: the radio page is the answer to the brief, but it's sitting
+        on a general speech-intelligence engine. Enrol Norris's voice once and every future clip
+        identifies him automatically. Same pipeline, different front door."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 07 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>07</b><span>OPERABLE</span></div>
+  <div>
+    <p class="eyebrow">Built to be run by someone who isn't us</p>
+    <h2>Every threshold on screen. No redeploy.</h2>
+
+    <p>Roughly forty pipeline parameters are editable live and apply to the very next job — denoise
+      strength, VAD padding, speaker-count bounds, identification thresholds, quality grade cutoffs.
+      A demo where the judge can move a slider and re-run beats a demo where we swear it's configurable.</p>
+
+    {{IMG:settings-tuning|Live-tunable pipeline settings, grouped by stage. Each field shows its default and flags itself when overridden.}}
+
+    <p>Models are swappable from the same page. Six Whisper sizes, two diarization pipelines, two
+      embedding models — download on demand with live progress, then activate. Settings that are baked
+      into the model pool at worker start are shown separately and honestly, with a
+      <em class="term">pending</em> badge until the worker restarts, so the UI never claims a change
+      took effect when it didn't.</p>
+
+    {{IMG:settings-models|The Models tab: pull any catalogued model on demand, watch progress, then activate it.}}
+
+    {{IMG:settings-system|Restart-scoped configuration, including the CPU/GPU device toggle. Values here are read once when the worker builds its model pool.}}
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"This is the slide that separates a hackathon demo from something a team could actually
+        operate. Nothing here is hardcoded. If our stress thresholds are wrong for your driver,
+        you fix them in the UI in ten seconds — you don't file a bug with us."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 08 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>08</b><span>STACK</span></div>
+  <div>
+    <p class="eyebrow">Architecture</p>
+    <h2>Five models, one box, no internet</h2>
+
+    <div class="scroll">
+      <table>
+        <tr><th>Role</th><th>Model</th><th>Notes</th></tr>
+        <tr><td class="k">ASR</td><td class="k">whisper large-v3-turbo</td><td>CTranslate2, int8, word timestamps</td></tr>
+        <tr><td class="k">VAD</td><td class="k">silero-vad</td><td>Weights ship in the wheel — no download</td></tr>
+        <tr><td class="k">Diarization</td><td class="k">pyannote 3.1</td><td>Batched on CPU for latency</td></tr>
+        <tr><td class="k">Speaker&nbsp;embed</td><td class="k">ECAPA-TDNN</td><td>192-dim, cosine match</td></tr>
+        <tr><td class="k">Text&nbsp;embed</td><td class="k">MiniLM multilingual</td><td>384-dim, ~50 languages</td></tr>
+      </table>
+    </div>
+
+    <p>FastAPI in front, an arq worker behind it, Postgres with pgvector for embeddings and Redis for
+      the queue. Jobs are retried with attempt limits; every run records its stage timings, so a slow
+      clip tells you <em class="term">which</em> stage was slow.</p>
+
+    <p>The whole thing runs <strong>fully offline</strong> — <code>HF_HUB_OFFLINE=1</code> is enforced
+      at runtime, models are resolved from local disk, and the only network call in the entire
+      application is the F1 data fetch itself. Audio never leaves the machine.</p>
+
+    <div class="stat-row">
+      <div class="stat"><b>~25s</b><span>9s clip, CPU</span></div>
+      <div class="stat"><b>56s</b><span>Model pool load</span></div>
+      <div class="stat"><b>int8</b><span>Quantization</span></div>
+      <div class="stat"><b>5</b><span>Export formats</span></div>
+    </div>
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"Everything you've seen ran on this laptop's CPU with the network off. That's deliberate:
+        team radio is competitive data. A paddock deployment that ships driver audio to someone
+        else's API is a non-starter, so we built for the constraint from the beginning."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 09 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>09</b><span>LIMITS</span></div>
+  <div>
+    <p class="eyebrow">What's real, what isn't, yet</p>
+    <h2>The parts we'd defend, and the parts we'd fix</h2>
+
+    <h3>Real, demonstrated live</h3>
+    <ul>
+      <li>End-to-end transcription, diarization and speaker ID on real F1 team radio</li>
+      <li>Tone read pinned to the nearest lap, colouring the lap chart</li>
+      <li>Per-driver baseline calibration across a session</li>
+      <li>Fully offline inference; live model swap and pipeline tuning from the UI</li>
+    </ul>
+
+    <h3>Honest gaps</h3>
+    <ul class="plain">
+      <li><strong>Tone is a heuristic</strong>, not a trained classifier — directional, not diagnostic.</li>
+      <li><strong>No validation set.</strong> We have no labelled stress corpus for F1 radio, so we
+        report no accuracy number rather than an invented one.</li>
+      <li><strong>No correlation demonstrated yet.</strong> In our five-call sample the stressed
+        calls did not precede slower laps. We're reporting the null result, not hiding it.</li>
+      <li><strong>The baseline is per worker process.</strong> Restart the worker and a driver's
+        calibration starts over, so early calls in a session are judged on absolute thresholds
+        until three calm samples land.</li>
+      <li><strong>Lap pinning is nearest-timestamp</strong>, which is right for a call made on track
+        and loose for one made in the pit lane.</li>
+      <li><strong>CPU inference is ~2.5&times; realtime</strong> per clip — fine for post-session
+        review, not yet for live race engineering. The device toggle is there for the GPU box.</li>
+    </ul>
+
+    <div class="say">
+      <span class="say-label">Say this</span>
+      <p>"Say this slide out loud rather than hiding it. Judges trust a team that names its own
+        weaknesses more than one that claims 94% accuracy on a number they can't source."</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════ 10 ══════════════════════════ -->
+<section class="slide">
+  <div class="rail"><b>10</b><span>CLOSE</span></div>
+  <div>
+    <p class="eyebrow">Where it goes</p>
+    <h2>From post-session review to the pit wall</h2>
+
+    <p>The natural next step is the one the architecture already anticipates: the Live mode and the
+      Race Radio mode are the same engine. Point the live ingest at a session's radio feed instead of
+      a microphone and the stress read becomes a real-time strip alongside the timing tower — the
+      engineer sees the driver's state on the same screen as the lap delta, while there's still a race
+      left to change.</p>
+
+    <p>Beyond that: a trained speech-emotion model dropped into the existing registry, stress trends
+      tracked across a season per driver, and a correlation view that answers the question this brief
+      is really asking — <strong>does a stressed call actually precede a slower lap?</strong> We built
+      the instrument that can finally measure it.</p>
+
+    <p class="lede" style="margin-top:28px">The driver has been telling the team how it's going all
+      along. Now somebody's listening.</p>
+
+    <div class="say">
+      <span class="say-label">Close on</span>
+      <p>"Every team already records this audio. Nobody reads it. We turned the one channel that
+        carries the driver's state into the one thing the pit wall understands — a number on a chart,
+        next to the lap time."</p>
+    </div>
+  </div>
+</section>
+
+<script>
+  // Real lap times: Lando Norris, Australian GP 2024 (OpenF1, session 9488). The three
+  // spikes are pit stops; the final lap is the in-lap. Drawn rather than styled so the
+  // hero opens on the actual data the demo runs against.
+  const LAPS = [90.272,83.183,82.656,82.609,82.685,82.632,82.744,82.63,82.727,82.695,82.936,
+    82.814,83.153,98.099,88.205,81.936,98.388,87.418,82.356,81.642,81.907,81.749,81.745,81.562,
+    81.713,81.611,81.976,81.837,81.864,81.982,81.848,81.574,81.692,81.769,81.51,81.446,81.662,
+    81.518,81.901,96.023,86.576,81.025,80.652,80.613,80.62,79.971,80.188,80.26,79.915,80.151,
+    80.261,79.959,80.267,80.107,80.294,80.481,80.571,110.655];
+
+  // Laps carrying an analysed radio call, read back out of the running app after the
+  // demo run (five calls collapse to four laps — two landed on the same lap).
+  const MOOD = { 1: "calm", 6: "calm", 7: "stressed", 8: "stressed" };
+  const COLOR = { calm: "#00C46A", stressed: "#FF4438", tired: "#FFB020" };
+
+  const cv = document.getElementById("trace");
+  const ctx = cv.getContext("2d");
+
+  function draw() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    cv.width = w * dpr; cv.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const min = Math.min(...LAPS), max = Math.max(...LAPS);
+    const gap = 2;
+    const bw = (w - gap * (LAPS.length - 1)) / LAPS.length;
+
+    LAPS.forEach((t, i) => {
+      const norm = (t - min) / (max - min || 1);
+      const bh = 12 + norm * (h - 18);
+      const x = i * (bw + gap);
+      const mood = MOOD[i + 1];
+      ctx.fillStyle = mood ? COLOR[mood] : "rgba(138,150,164,0.30)";
+      ctx.fillRect(x, h - bh, bw, bh);
+    });
+  }
+
+  draw();
+  let raf;
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(draw);
+  });
+</script>

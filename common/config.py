@@ -1,5 +1,7 @@
 """Every threshold used anywhere in the pipeline comes from here — no literals in stage code."""
 from functools import lru_cache
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 # Fields the Settings page is allowed to override live, via settings_overrides. Deliberately
@@ -20,6 +22,12 @@ TUNABLE_FIELDS = {
     "auto_enroll_min_reliability", "retention_days", "asr_beam_size", "asr_language",
     "job_timeout_s", "job_max_attempts",
 }
+
+# Editable from the Settings page too, but unlike TUNABLE_FIELDS these are read once when
+# ModelPool is built, so an edit is stored as pending and only bites on the next worker
+# start. Kept separate so the "applies to the next job" promise TUNABLE_FIELDS makes stays
+# true — the System tab renders these with the restart caveat attached.
+RESTART_TUNABLE_FIELDS = {"device"}
 
 # Groups TUNABLE_FIELDS for the Settings page — purely presentational.
 SETTINGS_CATEGORIES = {
@@ -60,7 +68,9 @@ class Settings(BaseSettings):
     target_duration_s: float = 60.0
     min_duration_s: float = 0.5
 
-    device: str = "auto"
+    # Literal, not str: this is settable from the Settings page, so a typo would otherwise
+    # be stored happily and only surface as a crashed worker on the next restart.
+    device: Literal["auto", "cpu", "cuda"] = "auto"
     precision: str = "int8"
     worker_concurrency: int = 2
     job_timeout_s: int = 300

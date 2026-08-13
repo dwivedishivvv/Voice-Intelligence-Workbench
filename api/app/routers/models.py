@@ -28,6 +28,24 @@ _inflight: set[tuple[str, str]] = set()
 _download_lock = asyncio.Lock()
 
 
+# A gated repo that 401s still leaves a directory behind holding whatever was public
+# (pyannote's leaves README.md + reproducible_research/), so "directory is non-empty" reports
+# a model as ready that the worker then can't load. Require an actual weights/pipeline file.
+_WEIGHT_SUFFIXES = {".bin", ".safetensors", ".ckpt", ".pt", ".pth", ".onnx"}
+
+
+def _has_weights(d: Path) -> bool:
+    return any(f.suffix in _WEIGHT_SUFFIXES or f.name == "config.yaml"
+               for f in d.rglob("*") if f.is_file())
+
+
+def _model_path(category: str, dir_name: str) -> Path:
+    cfg = get_settings()
+    sub = ("diar" if category == "diarization" else "asr" if category == "asr"
+           else "embed" if category == "embedding" else "text")
+    return Path(cfg.model_dir) / sub / dir_name
+
+
 @router.get("")
 async def list_models(user=Depends(get_current_user)):
     cfg = get_settings()
@@ -40,11 +58,18 @@ async def list_models(user=Depends(get_current_user)):
         options = []
         for opt in spec["options"]:
             state = downloaded.get((category, opt["repo_id"]))
+            # No DB row doesn't mean absent: models baked in at image build (or fetched by
+            # models/prefetch.py) never went through /pull, so disk is the other source of
+            # truth. Without this the page offers to re-download what's already there.
+            if state:
+                status = state["status"]
+            else:
+                d = _model_path(category, opt["dir_name"])
+                status = "downloaded" if d.is_dir() and _has_weights(d) else "not_downloaded"
             options.append({
                 **opt,
                 "active": opt["dir_name"] == active_dir,
-                "status": "downloading" if (category, opt["repo_id"]) in _inflight
-                          else (state["status"] if state else "not_downloaded"),
+                "status": "downloading" if (category, opt["repo_id"]) in _inflight else status,
                 "error": state["error"] if state else None,
             })
         out[category] = {"gated": spec["gated"], "options": options}
@@ -63,14 +88,33 @@ def _hf_token() -> str | None:
     return None
 
 
-def _do_download(category: str, repo_id: str, dir_name: str, gated: bool):
+def _reset_symlink_probe():
+    """huggingface_hub probes symlink support once per cache subdir and memoizes it, but it
+    seeds the entry True *before* the probe and only flips it to False inside the probe's
+    own except — so if the probe itself dies (transient lock on the temp dir it creates),
+    the dir is remembered as symlink-capable for the life of the process. Every later write
+    there then hits WinError 1314, which no amount of retrying from the UI can clear.
+    Dropping the memo makes Retry re-probe instead of needing an api restart."""
+    try:
+        from huggingface_hub.file_download import _are_symlinks_supported_in_dir
+        _are_symlinks_supported_in_dir.clear()
+    except ImportError:  # private, may move between hub versions — retry is still worth trying
+        pass
+
+
+def _do_download(category: str, opt: dict, gated: bool):
     from huggingface_hub import snapshot_download
-    cfg = get_settings()
-    dest = Path(cfg.model_dir) / ("diar" if category == "diarization" else
-                                   "asr" if category == "asr" else
-                                   "embed" if category == "embedding" else "text") / dir_name
-    snapshot_download(repo_id=repo_id, local_dir=str(dest), token=_hf_token() if gated else None,
-                       max_workers=4)
+
+    _reset_symlink_probe()
+    dest = _model_path(category, opt["dir_name"])
+    token = _hf_token() if gated else None
+    snapshot_download(repo_id=opt["repo_id"], local_dir=str(dest), token=token, max_workers=4)
+    # Same reason prefetch.py fetches these: nested repo-id refs inside a pipeline's config
+    # (pyannote's segmentation submodel, speechbrain's pretrained_path sub-checkpoints) are
+    # resolved at runtime by repo id through the HF *cache*, not this flat local_dir copy.
+    # Without them the model shows "downloaded" here but the worker fails to load it offline.
+    for dep_id in opt.get("depends_on", []):
+        snapshot_download(repo_id=dep_id, token=token, max_workers=4)
 
 
 @router.post("/pull")
@@ -98,7 +142,7 @@ async def pull_model(body: PullBody, user=Depends(get_current_user)):
                 prev = os.environ.get("HF_HUB_OFFLINE")
                 os.environ["HF_HUB_OFFLINE"] = "0"
                 try:
-                    await asyncio.to_thread(_do_download, body.category, body.repo_id, opt["dir_name"], spec["gated"])
+                    await asyncio.to_thread(_do_download, body.category, opt, spec["gated"])
                 finally:
                     if prev is None:
                         os.environ.pop("HF_HUB_OFFLINE", None)

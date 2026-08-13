@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelsPanel } from "@/components/models-panel";
 import { Lock, RotateCcw, SlidersHorizontal, Cpu } from "lucide-react";
 
@@ -17,7 +18,7 @@ type Field = {
   overridden: boolean; updated_at: string | null; type: "bool" | "int" | "float" | "str";
 };
 type Category = { name: string; fields: Field[] };
-type RestartField = { key: string; value: any; pending: any };
+type RestartField = { key: string; value: any; pending: any; editable: boolean; options: string[] | null };
 type SettingsView = { categories: Category[]; restart_required: RestartField[] };
 
 function humanize(key: string) {
@@ -37,6 +38,19 @@ export default function Settings() {
     try {
       await api.patchSettings({ [key]: value });
       toast.success(`${humanize(key)} updated`, { description: "Takes effect on the next job." });
+      load();
+    } catch (e) {
+      toast.error(`Couldn't update ${humanize(key)}`, { description: String(e) });
+    }
+  }
+
+  // Same PATCH as save(), different promise: these are read once when the worker builds its
+  // model pool, so the change is pending until it restarts. Saying "next job" here would be
+  // a lie that looks like a bug when the next job runs on the old device.
+  async function restartSave(key: string, value: string) {
+    try {
+      await api.patchSettings({ [key]: value });
+      toast.success(`${humanize(key)} set to ${value}`, { description: "Takes effect after the worker restarts." });
       load();
     } catch (e) {
       toast.error(`Couldn't update ${humanize(key)}`, { description: String(e) });
@@ -126,6 +140,23 @@ export default function Settings() {
                         <Badge variant="outline" className="gap-1 border-primary/30 bg-primary/10 font-mono text-xs text-primary">
                           → {String(f.pending)} pending
                         </Badge>
+                      )}
+                      {f.editable && f.options && (
+                        <Select
+                          value={String(f.pending ?? f.value)}
+                          onValueChange={(v) => restartSave(f.key, v)}
+                        >
+                          <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {f.options.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      )}
+                      {f.editable && f.pending != null && (
+                        <Button variant="ghost" size="icon" className="size-8 text-muted-foreground"
+                                onClick={() => reset(f.key)} title="Clear pending change">
+                          <RotateCcw className="size-3.5" />
+                        </Button>
                       )}
                     </div>
                   </div>

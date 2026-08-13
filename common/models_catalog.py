@@ -32,9 +32,11 @@ CATALOG = {
         "gated": True,
         "options": [
             {"repo_id": "pyannote/speaker-diarization-3.1", "dir_name": "pyannote-3.1",
-             "label": "pyannote 3.1", "note": "Default. Current-generation pipeline."},
+             "label": "pyannote 3.1", "note": "Default. Current-generation pipeline.",
+             "depends_on": ["pyannote/segmentation-3.0", "pyannote/wespeaker-voxceleb-resnet34-LM"]},
             {"repo_id": "pyannote/speaker-diarization-3.0", "dir_name": "pyannote-3.0",
-             "label": "pyannote 3.0", "note": "Previous generation — kept for comparison/rollback."},
+             "label": "pyannote 3.0", "note": "Previous generation — kept for comparison/rollback.",
+             "depends_on": ["pyannote/segmentation-3.0", "pyannote/wespeaker-voxceleb-resnet34-LM"]},
         ],
     },
     "embedding": {
@@ -42,9 +44,11 @@ CATALOG = {
         "gated": False,
         "options": [
             {"repo_id": "speechbrain/spkrec-ecapa-voxceleb", "dir_name": "ecapa",
-             "label": "ECAPA-TDNN", "note": "Default. Strong general-purpose speaker embeddings."},
+             "label": "ECAPA-TDNN", "note": "Default. Strong general-purpose speaker embeddings.",
+             "depends_on": ["speechbrain/spkrec-ecapa-voxceleb"]},
             {"repo_id": "speechbrain/spkrec-xvect-voxceleb", "dir_name": "xvect",
-             "label": "X-Vector", "note": "Older architecture, smaller, less discriminative."},
+             "label": "X-Vector", "note": "Older architecture, smaller, less discriminative.",
+             "depends_on": ["speechbrain/spkrec-xvect-voxceleb"]},
         ],
     },
     "text_embedding": {

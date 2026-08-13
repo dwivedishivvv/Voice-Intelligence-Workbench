@@ -28,12 +28,25 @@ LIVE_LANG_RECHECK_EVERY = 6
 
 async def startup(ctx):
     cfg = get_settings()
-    ctx["cfg"] = cfg
     await db.init_pool(cfg)
+    # Startup is the *only* moment the restart-required settings can take effect, so read
+    # the DB overrides here rather than the env-only defaults. Without this, both the
+    # Settings page's device toggle and the Models tab's Activate button write a
+    # settings_overrides row that nothing ever reads — they'd appear to work and change
+    # nothing. (Connection settings above are deliberately still env-only: the pool has to
+    # exist before there's a DB to read overrides from.)
+    cfg = await get_effective_settings()
+    ctx["cfg"] = cfg
     await init_events(cfg.redis_url)
     ctx["pool"] = ModelPool(cfg)
     load_ms = await ctx["pool"].load()
-    ctx["gpu_sem"] = asyncio.Semaphore(cfg.worker_concurrency)
+    # On CPU this has to be 1, and not only for the throughput reason spelled out for
+    # live_sem below: every job shares the one ModelPool, and the models in it (silero's
+    # JIT module, faster-whisper, pyannote) are not thread-safe. Two jobs calling the same
+    # module from two threadpool threads corrupts the heap and takes the process down with
+    # a bare 0xC0000374 — no traceback, job stuck mid-status. Concurrency on CPU buys
+    # nothing here anyway, so serialize rather than add per-model locks.
+    ctx["gpu_sem"] = asyncio.Semaphore(1 if ctx["pool"].device == "cpu" else cfg.worker_concurrency)
     # CPU-only whisper/pyannote calls already saturate every core by themselves — running
     # two concurrently doesn't parallelize, it thrashes (each ~2-4x slower), which is fatal
     # for live chunks where a growing backlog means falling further behind in real time.
