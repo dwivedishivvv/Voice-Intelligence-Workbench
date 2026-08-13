@@ -1,0 +1,41 @@
+version: 1
+models:
+  asr:
+    id: deepdml/faster-whisper-large-v3-turbo-ct2
+    revision: main
+    local_dir: /models/asr/large-v3-turbo
+    format: ctranslate2
+    purpose: Multilingual ASR with word timestamps and token logprobs
+
+  # VAD is NOT fetched here — the `silero-vad` PyPI package bundles its own weights
+  # in the wheel (no HF repo, no network call at runtime). See worker/pyproject.toml.
+
+  diarization:
+    id: pyannote/speaker-diarization-3.1
+    revision: main
+    local_dir: /models/diar/pyannote-3.1
+    gated: true
+    purpose: Speaker diarization
+    depends_on:
+      - pyannote/segmentation-3.0
+      - pyannote/wespeaker-voxceleb-resnet34-LM
+
+  embedding:
+    id: speechbrain/spkrec-ecapa-voxceleb
+    revision: main
+    local_dir: /models/embed/ecapa
+    dim: 192
+    purpose: Speaker verification embeddings
+    # ecapa's own hyperparams.yaml hardcodes `pretrained_path: speechbrain/spkrec-ecapa-voxceleb`
+    # for its sub-checkpoints — speechbrain resolves those via hf_hub_download using that repo
+    # id regardless of the local `source` override, so (like pyannote's segmentation submodel)
+    # it needs to exist in the standard HF cache too, not just this flat local_dir copy.
+    depends_on:
+      - speechbrain/spkrec-ecapa-voxceleb
+
+  text_embedding:
+    id: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+    revision: main
+    local_dir: /models/text/minilm
+    dim: 384
+    purpose: Multilingual utterance embeddings for semantic search

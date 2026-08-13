@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.env
+.env.local
+.env.*.local
+
+# Database
+*.sqlite
+*.db
+src/memory/faiss_store/
+
+# Cache
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Distribution / Build
+dist/
+build/
+*.egg-info/
+
+# Speaker Workbench
+.hf_token
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
+
+# stray OneDrive sync-conflict copy — contains live API keys, never commit
+.env.onedrive-locked
+
+# local dev-server/worker stdout redirects, not build artifacts
+worker/worker_log*.txt
+web/vite_log*.txt
