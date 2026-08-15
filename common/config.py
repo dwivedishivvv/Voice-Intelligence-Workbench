@@ -21,6 +21,7 @@ TUNABLE_FIELDS = {
     "verify_threshold", "cluster_threshold", "auto_enroll", "auto_enroll_min_sim",
     "auto_enroll_min_reliability", "retention_days", "asr_beam_size", "asr_language",
     "job_timeout_s", "job_max_attempts",
+    "graph_lap_match_tolerance_s",
 }
 
 # Editable from the Settings page too, but unlike TUNABLE_FIELDS these are read once when
@@ -46,6 +47,8 @@ SETTINGS_CATEGORIES = {
                                 "auto_enroll_min_sim", "auto_enroll_min_reliability"],
     "Transcription": ["asr_beam_size", "asr_language"],
     "Jobs & retention": ["job_timeout_s", "job_max_attempts", "retention_days"],
+    # Unlike the rest, this one applies to the next *graph sync* rather than the next job.
+    "Graph": ["graph_lap_match_tolerance_s"],
 }
 
 
@@ -62,6 +65,52 @@ class Settings(BaseSettings):
     postgres_user: str = "workbench"
     postgres_password: str = "change-me"
     redis_url: str = "redis://localhost:6379/0"
+
+    # Graph projection (GRAPH_RAG_PLAN.md). Off by default, and deliberately absent from
+    # TUNABLE_FIELDS for the same reason the other connection fields are: it is deployment
+    # wiring, not a threshold, and Neo4j holds a *derived* read model — with it off, search,
+    # the pipeline and every existing page carry on exactly as before.
+    graph_enabled: bool = False
+    # Slack when matching a moment of speech to the lap it happened on. OpenF1's radio
+    # timestamps and its lap timestamps come from different feeds and do not agree to the
+    # millisecond, so a call a hair before a lap boundary would otherwise land on neither
+    # lap. Speech inside the overlap links to both laps rather than being assigned to the
+    # nearer one by coin flip -- the same abstain-over-guess posture the identification
+    # stage takes.
+    graph_lap_match_tolerance_s: float = 2.0
+    # GRAPH_* rather than NEO4J_*: the neo4j container reads every NEO4J_-prefixed
+    # variable in its environment as a server config setting and refuses to start on one
+    # it doesn't recognise. Sharing that prefix with the client's own connection settings
+    # makes .env un-shareable between the two.
+    graph_uri: str = "bolt://localhost:7687"
+    graph_user: str = "neo4j"
+    graph_password: str = "change-me"
+
+    # Agent layer (AGENT_LAYER_PLAN.md). OFF BY DEFAULT, and not a TUNABLE_FIELD: this is
+    # the one setting in the system that changes where data goes. With it false the agent
+    # routes 404 and the product's "nothing leaves the box" property holds exactly as
+    # before; with it true, transcript excerpts are sent to the Anthropic API as tool
+    # results. That is a deployment decision, not a threshold to tweak from a web page.
+    llm_enabled: bool = False
+    # anthropic | nvidia. "nvidia" is the OpenAI-compatible path: it also serves any other
+    # OpenAI-shaped endpoint (a local vLLM or Ollama server) by pointing NVIDIA_BASE_URL
+    # elsewhere, which is what makes keeping two providers worth it rather than one plus
+    # a speculative abstraction.
+    llm_provider: str = "anthropic"
+    anthropic_api_key: str = ""
+    nvidia_api_key: str = ""
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    # Empty means "the default for the selected provider" (see agent.DEFAULT_MODELS), so
+    # switching provider does not silently keep pointing at the other one's model id.
+    llm_model: str = ""
+    # Bounds a runaway loop. Cheaper and simpler than a token budget for a first cut; swap
+    # in output_config.task_budget if real questions start hitting this legitimately.
+    llm_max_iterations: int = 12
+    # Per-response cap on the OpenAI-compatible path. Reasoning models need this several
+    # times larger, because their chain of thought is billed against the same budget as
+    # the answer.
+    llm_max_tokens: int = 4096
+    llm_effort: str = "high"
 
     max_upload_mb: int = 50
     max_duration_s: float = 90.0

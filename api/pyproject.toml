@@ -18,6 +18,9 @@ dependencies = [
   "torch==2.4.*",
   "sentence-transformers==3.*",
   "httpx==0.27.*",
+  # graph projection only — common/graph.py imports it lazily so the worker, which shares
+  # common/ but never queries the graph, does not need it in its own dependency set
+  "neo4j==5.*",
 ]
 
 [tool.uv]

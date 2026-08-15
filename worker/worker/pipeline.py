@@ -7,7 +7,7 @@ from common import db
 from common.config import config_snapshot
 from .ctx import Ctx
 from .errors import RejectError
-from .events import emit
+from common.events import emit
 from .stages import (validate, preprocess, transcribe, diarize, reconcile,
                       embed, identify, postprocess, sentiment, index)
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 
 import structlog
@@ -13,7 +14,7 @@ from .audio.decode import decode_to_array
 from .audio.enhance import highpass, loudness_normalize
 from .pool import ModelPool
 from .pipeline import process_clip
-from .events import init_events, emit_live, emit_f1_result
+from common.events import init_events, emit_live, emit_f1_result
 from .stages.transcribe import compression_ratio, BOILERPLATE
 from .audio import tone as tone_mod
 
@@ -175,7 +176,7 @@ async def transcribe_live_chunk_job(ctx, session_id: str, chunk_rel_path: str, s
     await emit_live(session_id, seq, text, mood, features, error)
 
 
-async def analyze_f1_radio_job(ctx, job_id: str, rel_path: str, session_key: int | None = None,
+async def analyze_f1_radio_job(ctx, radio_call_id: str, rel_path: str, session_key: int | None = None,
                                 driver_number: int | None = None):
     cfg = get_settings()
     path = storage.resolve(cfg, rel_path)
@@ -215,13 +216,23 @@ async def analyze_f1_radio_job(ctx, job_id: str, rel_path: str, session_key: int
                     tone_mod.update_baseline(baseline, features)
     except Exception as e:
         error = str(e)[:200]
-        log.warning("f1_radio_failed", job_id=job_id, error=error)
+        log.warning("f1_radio_failed", radio_call_id=radio_call_id, error=error)
     finally:
+        # The audio is not retained: the F1 page plays each call straight from its
+        # livetiming.formula1.com URL, so a local copy would serve nothing today. Keep
+        # it here if radio ever goes through the full clip pipeline, which needs a file.
         try:
             os.remove(path)
         except OSError:
             pass
-    await emit_f1_result(job_id, text, mood, features, error)
+
+    # Persist before emitting, so a client that reconnects after the websocket message
+    # has already gone out can still read the result back via GET /v1/f1/analyses.
+    await db.execute(
+        """UPDATE radio_calls SET text=$2, mood=$3, features=$4, error=$5, analyzed_at=now()
+           WHERE id=$1""",
+        radio_call_id, text, mood, json.dumps(features) if features else None, error)
+    await emit_f1_result(radio_call_id, text, mood, features, error)
 
 
 class WorkerSettings:

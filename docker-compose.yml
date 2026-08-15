@@ -16,6 +16,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # The files init.sql includes. Mounted here rather than in initdb.d because anything
+      # in initdb.d is also run on its own, alphabetically — f1.sql would run before
+      # init.sql and fail on the tables it alters.
+      - ./db:/db:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -32,5 +36,32 @@ services:
       retries: 10
     ports: ["6379:6379"]
 
+  # Derived read model, rebuilt from Postgres by common/graph_sync.py. Nothing in the
+  # pipeline writes to it, so losing this volume costs a re-projection and nothing else.
+  # Started with the other datastores but only used when GRAPH_ENABLED=true.
+  neo4j:
+    # Deliberately NOT `<<: *common`. The anchor carries `env_file: .env`, and the neo4j
+    # image turns *every* NEO4J_-prefixed variable it finds into a server config setting --
+    # so the app's own NEO4J_URI was read as a setting named "URI" and the container
+    # refused to boot ("Unrecognized setting"). The app-side variables are GRAPH_* for that
+    # reason. Skipping env_file also keeps the Postgres password and API key out of a
+    # container that has no use for either.
+    restart: unless-stopped
+    image: neo4j:5-community
+    environment:
+      # `:?` so a missing password fails the up with a named error instead of silently
+      # starting the database with blank auth.
+      NEO4J_AUTH: neo4j/${GRAPH_PASSWORD:?set GRAPH_PASSWORD in .env}
+      NEO4J_server_memory_heap_max__size: 1G
+    volumes:
+      - neo4jdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ports: ["7474:7474", "7687:7687"]
+
 volumes:
   pgdata: {}
+  neo4jdata: {}

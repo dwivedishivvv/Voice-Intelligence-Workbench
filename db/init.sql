@@ -291,4 +291,9 @@ CREATE TABLE downloaded_models (
 
 -- Races + sentiment columns. Kept separate and idempotent so it can also be replayed
 -- against an already-initialized database (init.sql itself only runs on a fresh volume).
-\ir races.sql
+-- Absolute: init.sql is mounted into initdb.d, its siblings into /db (see docker-compose).
+\i /db/races.sql
+
+-- OpenF1 sessions/drivers/laps + radio-call results. Same reasoning as races.sql, and
+-- ordered after it because f1.sql alters clips, which races.sql also touches.
+\i /db/f1.sql

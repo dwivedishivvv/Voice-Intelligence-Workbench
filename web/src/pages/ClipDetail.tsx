@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/api/client";
 import { StatusBadge } from "@/components/status-badge";
@@ -43,11 +43,24 @@ export default function ClipDetail() {
   const [seekTo, setSeekTo] = useState<{ time: number; nonce: number } | null>(null);
   const seek = (time: number) => setSeekTo((prev) => ({ time, nonce: (prev?.nonce ?? 0) + 1 }));
   const activeRowRef = useRef<HTMLDivElement>(null);
+  const [searchParams] = useSearchParams();
 
   async function load() {
     if (id) setResult(await api.getResult(id));
   }
   useEffect(() => { load(); }, [id]);
+
+  // ?t=<seconds> deep link. An agent answer cites a moment, not a file, so following a
+  // citation has to land on the audio at that moment -- otherwise "verifiable" means
+  // scrubbing a 90-second clip by hand. Runs once the result is loaded, because the
+  // player does not exist before then.
+  const seekedRef = useRef(false);
+  useEffect(() => {
+    const t = Number(searchParams.get("t"));
+    if (!result || seekedRef.current || !Number.isFinite(t) || t <= 0) return;
+    seekedRef.current = true;
+    seek(t);
+  }, [result, searchParams]);
 
   const wordsByUtterance = useMemo(() => {
     const map = new Map<string, any[]>();
