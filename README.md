@@ -6,6 +6,11 @@ identify speakers → index — then lets you review, correct, search, and expor
 Models live on disk under `MODEL_DIR` and run with `HF_HUB_OFFLINE=1`:
 no audio and no text ever leaves the box.
 
+Two optional features are the exceptions, both off by default: **Race Radio** fetches F1
+session data from OpenF1, and the **agent layer** (`LLM_ENABLED`) sends transcript excerpts
+to the Anthropic API. With both disabled — the default — the core pipeline makes no
+outbound calls at all.
+
 Three ways in: **batch upload**, **live microphone transcription**, and **Race Radio**, an
 F1 team-radio analyzer that pulls driver radio calls and lines their vocal tone up against
 lap times.
@@ -56,8 +61,10 @@ lap times.
 | Live | mic capture, pause-aligned chunking, transcript + tone read (no per-chunk speaker ID) |
 | Race Radio | OpenF1 session/driver/lap data, radio ingestion, heuristic tone classification |
 | Ops | structured logs with correlation IDs, Prometheus metrics, hash-chained audit log, deletion receipts |
+| Graph | optional Neo4j projection of clips, speakers, drivers, sessions and laps — a derived read model rebuilt from Postgres |
 | Tuning | every pipeline knob editable live from the UI — applies to the next job, no restart |
 | Models | download and activate alternate ASR/diarization/embedding models from Settings |
+| Agent | optional LLM that answers questions by querying the corpus with read-only tools, and cites the speech ids behind every claim (off by default) |
 
 ## Architecture
 
@@ -115,6 +122,59 @@ localStorage.setItem("api_key", "<API_KEY from .env>")
 
 Other targets: `make down` (stop), `make clean` (stop + drop volumes), `make logs`,
 `make test`.
+
+### The graph projection (optional)
+
+Off unless `GRAPH_ENABLED=true`. Neo4j holds a *derived* read model — Postgres stays the
+source of truth and nothing in the pipeline writes to the graph, so it can be wiped and
+rebuilt at any time, and with it disabled every other page behaves exactly as before.
+
+```powershell
+docker compose up -d neo4j
+# db/init.sql only runs on a *fresh* postgres volume, so an existing database needs the
+# new tables replayed. f1.sql is written to be idempotent precisely for this:
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $env:POSTGRES_USER -d $env:POSTGRES_DB < db/f1.sql
+python -m common.graph_sync --full  # project Postgres into Neo4j, prints per-label counts
+```
+
+The sync prints what it *sent* next to what actually *landed*. Those two agreeing is the
+check that matters: relationship projections MATCH their endpoints rather than creating
+them, so a dropped endpoint shows up as a gap between the two columns rather than as an
+error.
+
+Then browse it at `http://localhost:7474`. `POST /v1/admin/graph/sync` does the same thing
+over HTTP and writes an `audit_log` row.
+
+What gets projected: speakers, clips, utterances, races, and the F1 side (sessions,
+drivers, teams, circuits, laps, radio calls). Utterances and radio calls share a `:Speech`
+label — they are the same kind of thing, a unit of transcribed speech with a tone read,
+and only differ in how much of the pipeline has touched them.
+
+Two edges do the analytical work. `DURING_LAP` ties a moment of speech to the lap it
+happened on, which is what makes "was the tone stressed on the lap that lost time" a single
+hop; it needs a wall-clock timestamp, so radio calls (which carry one from OpenF1) get it
+and manually uploaded clips without `recorded_at` do not. `MENTIONS` links speech to the
+drivers, teams and circuits named in it, via a dictionary matcher over `f1_aliases` rather
+than an NER model — the vocabulary is closed, small, and already in the database.
+
+`POST /v1/graph/context` is what reads it back: the query is ranked in Postgres (the same
+hybrid search the search page uses, widened to cover radio calls), each hit's neighbourhood
+is pulled from Neo4j in one round trip, and the result is rendered as short lines rather
+than returned as raw JSON:
+
+```
+[abc-123] Monaco Grand Prix 2024 | VER (Red Bull Racing)
+  tone: voice reads stressed, words read negative (-0.62)
+  "I can't get past, the tyres are gone"
+  lap 42: 74.8s (+0.9s vs previous)
+  mentions: LEC (driver)
+```
+
+Tone is always phrased as a reading, never as a fact — the classifier behind it is a
+threshold heuristic (`worker/worker/audio/tone.py`), and the block leads with its speech id
+so any claim built on it can be traced back to the recording.
+
+See `GRAPH_RAG_PLAN.md` for the full node/edge model and what is deliberately left out.
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/) — see `api/pyproject.toml`
 and `worker/pyproject.toml`. The worker needs Python 3.11 and a CUDA build of torch; the
@@ -376,9 +436,23 @@ Every route requires `X-API-Key` (`api/app/auth.py:get_current_user`).
 
 **Search** — `POST /v1/search` (`q`, `mode`, `speaker_id`, `limit`).
 
+**Agent** — `POST /v1/agent/ask` (`question`, optional `history`, optional
+`conversation_id`). Runs against either Anthropic or any OpenAI-compatible endpoint
+(NVIDIA NIM, local vLLM/Ollama) via `LLM_PROVIDER`; the four tools are shared, only the
+loop differs: answers a question by querying the corpus with four read-only tools,
+returning the answer plus the speech ids it cited, the tools it used and token usage.
+Blocking, with progress mirrored to `WS /v1/ws/jobs/{conversation_id}`. 503 when
+`LLM_ENABLED=false`.
+
+**Graph** — `POST /v1/graph/context` (`q` or explicit `speech_ids`, `limit`, `mode`,
+`speaker_id`, `max_chars`): ranks speech in Postgres, expands each hit's neighbourhood in
+Neo4j, and returns both the structured rows and a rendered text block. 503 when
+`GRAPH_ENABLED=false`.
+
 **Admin** — `/v1/admin`: `GET /config`, `GET|PATCH /settings`, `DELETE /settings/{key}`,
 `POST /calibrate`, `GET /calibration/latest`, `GET /corrections?days=`, `GET /stats`,
-`GET /audit?limit=`.
+`GET /audit?limit=`, `POST /graph/sync`, `GET /graph/summary` (both 503 when
+`GRAPH_ENABLED=false`).
 
 **Models** — `/v1/admin/models`: `GET ``, `POST /pull`, `POST /activate`.
 
@@ -406,6 +480,8 @@ wins over the environment for the next job.
 | Diarization | `DIAR_MIN_SPEAKERS`, `DIAR_MAX_SPEAKERS`, `MIN_TURN_S`, `MERGE_GAP_S`, `VAD_SNAP_TOL_S`, `OVERLAP_WARN_RATIO` |
 | Identification | `RELIABILITY_*`, `ID_THRESHOLD`, `ID_SUGGEST_DELTA`, `ID_MIN_MARGIN`, `ID_THRESHOLD_PENALTY`, `VERIFY_THRESHOLD`, `CLUSTER_THRESHOLD`, `AUTO_ENROLL*` |
 | Privacy/ops | `LOG_TRANSCRIPTS` (off by default), `RETENTION_DAYS` (0 = keep forever), `API_KEY` |
+| Agent (optional) | `LLM_ENABLED` (**off by default** — the only setting that sends text off the box), `LLM_PROVIDER` (`anthropic` \| `nvidia`), `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, `NVIDIA_BASE_URL`, `LLM_MODEL`, `LLM_MAX_ITERATIONS`, `LLM_MAX_TOKENS`, `LLM_EFFORT` |
+| Graph (optional) | `GRAPH_ENABLED` (off by default), `GRAPH_URI`, `GRAPH_USER`, `GRAPH_PASSWORD` (named `GRAPH_*`, not `NEO4J_*`: the neo4j container reads any `NEO4J_`-prefixed variable as one of its own config settings and won't start on an unknown one) |
 
 ## Data model
 
@@ -427,6 +503,13 @@ calibration_runs     EER sweeps
 deletion_receipts    proof of deletion after the data is gone
 settings_overrides   live tuning
 downloaded_models    model catalog state
+
+f1_sessions ──┬── f1_drivers       OpenF1 session/driver/lap data, cached write-through
+              └── f1_laps          on every proxy call rather than re-fetched each time
+radio_calls          one row per team-radio recording; unique on recording_url, so a
+                     repeat analysis is a database read instead of a re-transcription
+f1_aliases           entity-linking vocabulary for graph MENTIONS edges ('auto' rows are
+                     re-derived each sync, 'manual' rows are yours and are never touched)
 ```
 
 HNSW cosine indexes on `utterances.embedding`, `speaker_profiles.centroid`,
@@ -464,9 +547,12 @@ docker compose logs worker | grep models_loaded   # models loaded from local dis
 ```
 
 `worker.pool.verify_models` runs at worker startup and raises if any model in `models/REGISTRY.yaml` is missing —
-see its `verify_models` step. The only outbound network calls in the whole system are the
-OpenF1 proxy and radio download in the optional Race Radio feature; the core pipeline makes
-none.
+see its `verify_models` step. The core pipeline makes no outbound calls. Two optional
+features do, and both are off unless you turn them on: the OpenF1 proxy and radio download
+behind Race Radio, and the agent layer (`LLM_ENABLED=false` by default), which is the only
+thing in the system that sends **transcript text** to a third party. `LLM_ENABLED` is
+deliberately not editable from the Settings page — it lives in `.env`, where enabling it is
+a deliberate, reviewable act rather than a checkbox anyone with the API key can tick.
 
 ## What's scoped out (and where the seam is)
 

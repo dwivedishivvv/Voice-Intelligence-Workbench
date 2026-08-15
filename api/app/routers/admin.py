@@ -3,7 +3,9 @@ from typing import get_args
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from common import db, speaker as sc
+from common import db, speaker as sc, graph_sync
+from common.audit import audit
+from common.graph import GraphUnavailable
 from common.config import (get_settings, get_effective_settings, config_snapshot,
                             Settings, TUNABLE_FIELDS, RESTART_TUNABLE_FIELDS,
                             SETTINGS_CATEGORIES)
@@ -115,6 +117,28 @@ async def stats(user=Depends(get_current_user)):
     return {"total_clips": total,
             "by_status": {r["status"]: r["c"] for r in by_status},
             "identification_results": {r["match_result"]: r["c"] for r in by_result}}
+
+
+@router.post("/graph/sync")
+async def rebuild_graph(user=Depends(get_current_user)):
+    """Rebuild the Neo4j projection from Postgres. Safe to run at any time — it wipes and
+    re-projects a derived read model, so the worst case is a stale graph for the duration."""
+    try:
+        sent = await graph_sync.rebuild()
+        got = await graph_sync.summary()
+    except GraphUnavailable as e:
+        # 503, not 500: an optional datastore being off is a deployment state, not a bug.
+        raise HTTPException(503, str(e)) from e
+    await audit("graph.sync", "graph", "neo4j", after={"projected": sent, **got}, actor=user)
+    return {"projected": sent, **got}
+
+
+@router.get("/graph/summary")
+async def graph_summary(user=Depends(get_current_user)):
+    try:
+        return await graph_sync.summary()
+    except GraphUnavailable as e:
+        raise HTTPException(503, str(e)) from e
 
 
 @router.get("/audit")

@@ -88,11 +88,20 @@ export const api = {
   f1TeamRadio: (sessionKey: number, driverNumber: number) =>
     req(`/v1/f1/team_radio?session_key=${sessionKey}&driver_number=${driverNumber}`),
   f1TeamRadioAll: (sessionKey: number) => req(`/v1/f1/team_radio?session_key=${sessionKey}`),
-  f1Ingest: (recording_url: string, session_key?: number, driver_number?: number) =>
+  f1Analyses: (sessionKey: number) => req(`/v1/f1/analyses?session_key=${sessionKey}`),
+
+  agentAsk: (question: string, history: unknown[] | null, conversationId: string) =>
+    req("/v1/agent/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, history, conversation_id: conversationId }),
+    }),
+  graphSummary: () => req("/v1/admin/graph/summary"),
+  f1Ingest: (recording_url: string, session_key?: number, driver_number?: number, force?: boolean) =>
     req("/v1/f1/ingest", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ recording_url, session_key, driver_number }),
+      body: JSON.stringify({ recording_url, session_key, driver_number, force }),
     }),
 
   listRaces: () => req("/v1/races"),

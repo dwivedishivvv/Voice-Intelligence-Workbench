@@ -33,7 +33,11 @@ async def enqueue_live_chunk(session_id: str, chunk_rel_path: str, seq: int):
                               _job_id=f"live-{session_id}-{seq}-{uuid.uuid4().hex[:8]}")
 
 
-async def enqueue_f1_radio(job_id: str, rel_path: str, session_key: int | None = None,
+async def enqueue_f1_radio(radio_call_id: str, rel_path: str, session_key: int | None = None,
                             driver_number: int | None = None):
-    await _redis.enqueue_job("analyze_f1_radio_job", job_id, rel_path, session_key, driver_number,
-                              _job_id=f"f1-{job_id}")
+    # Same arq caveat as enqueue_clip: radio_call_id is now a stable row id rather than a
+    # per-request uuid, so reusing it verbatim as _job_id would make a re-analysis within
+    # keep_result silently return None instead of running. The public job/ws id stays
+    # radio_call_id — the worker publishes to `job:{radio_call_id}` regardless.
+    await _redis.enqueue_job("analyze_f1_radio_job", radio_call_id, rel_path, session_key, driver_number,
+                              _job_id=f"f1-{radio_call_id}-{uuid.uuid4().hex[:8]}")

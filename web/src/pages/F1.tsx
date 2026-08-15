@@ -202,7 +202,25 @@ export default function F1() {
     if (!sessionKey || !driverNumber) return;
     setLaps(null); setRadio(null); setAnalyses(new Map()); setSelected(null);
     api.f1Laps(sessionKey, driverNumber).then((r) => setLaps(r)).catch(() => setLaps([]));
-    api.f1TeamRadio(sessionKey, driverNumber).then((r) => setRadio(r)).catch(() => setRadio([]));
+    // Seed from analyses already stored server-side, so calls analyzed in an earlier
+    // visit come back showing their transcript instead of an empty "Analyze" button.
+    // Keyed by clip.date like every other per-call map on this page; the stored rows
+    // are matched to the fetched clips by recording_url, which is their natural key.
+    api.f1TeamRadio(sessionKey, driverNumber).then(async (r: RadioClip[]) => {
+      setRadio(r);
+      const stored = await api.f1Analyses(sessionKey).catch(() => []);
+      const byUrl = new Map<string, any>(stored.map((s: any) => [s.recording_url, s]));
+      setAnalyses((prev) => {
+        const next = new Map(prev);
+        for (const c of r) {
+          const s = byUrl.get(c.recording_url);
+          if (s) next.set(c.date, {
+            status: s.error ? "error" : "done", text: s.text, mood: s.mood, features: s.features,
+          });
+        }
+        return next;
+      });
+    }).catch(() => setRadio([]));
   }, [sessionKey, driverNumber]);
 
   useEffect(() => () => wsRefs.current.forEach((ws) => ws.close()), []);
@@ -214,6 +232,14 @@ export default function F1() {
     setAnalyses((prev) => new Map(prev).set(key, { status: "pending" }));
     return new Promise<void>((resolve) => {
       api.f1Ingest(clip.recording_url, sessionKey ?? undefined, clip.driver_number).then((res) => {
+        // Already analyzed server-side — no job was queued and no websocket will fire.
+        if (res.cached) {
+          setAnalyses((prev) => new Map(prev).set(key, {
+            status: "done", text: res.text, mood: res.mood, features: res.features,
+          }));
+          resolve();
+          return;
+        }
         const ws = new WebSocket(`${location.origin.replace("http", "ws")}${res.ws_url}`);
         wsRefs.current.set(key, ws);
         ws.onmessage = (e) => {

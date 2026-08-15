@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import Layout from "@/components/layout";
 import Library from "./pages/Library";
+import Ask from "./pages/Ask";
 import Upload from "./pages/Upload";
 import Live from "./pages/Live";
 import F1 from "./pages/F1";
@@ -20,6 +21,7 @@ function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<Library />} />
+          <Route path="/ask" element={<Ask />} />
           <Route path="/upload" element={<Upload />} />
           <Route path="/live" element={<Live />} />
           <Route path="/f1" element={<F1 />} />
