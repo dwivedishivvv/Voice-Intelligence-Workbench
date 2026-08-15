@@ -1,7 +1,7 @@
-.PHONY: up down logs test
+.PHONY: up down clean logs test
 
-up:      ; docker compose up -d --build
-down:    ; docker compose down
+up:      ; pwsh -File start.ps1
+down:    ; pwsh -File start.ps1 -Stop -Down
 clean:   ; docker compose down -v
-logs:    ; docker compose logs -f api worker
+logs:    ; docker compose logs -f
 test:    ; python -m pytest tests/unit -q

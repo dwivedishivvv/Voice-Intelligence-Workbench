@@ -23,6 +23,12 @@ import {
 const API_KEY = () => localStorage.getItem("api_key") || "change-me";
 const EXPORT_FORMATS = ["srt", "vtt", "rttm", "json", "txt"];
 
+const SENTIMENT_STYLE: Record<string, string> = {
+  positive: "bg-success/15 text-success border-success/30",
+  negative: "bg-destructive/15 text-destructive border-destructive/30",
+  neutral: "bg-muted text-muted-foreground border-border",
+};
+
 export default function ClipDetail() {
   const { id } = useParams();
   const [result, setResult] = useState<any>(null);
@@ -50,6 +56,39 @@ export default function ClipDetail() {
       map.get(w.utterance_id)!.push(w);
     }
     return map;
+  }, [result]);
+
+  // Sentiment per speaker, for a recording with more than one voice. The pipeline scores
+  // every utterance individually and each utterance carries its speaker, so this is a
+  // grouping, not a second analysis — one clip-level number would average a driver's
+  // frustration together with their engineer's calm and report neither.
+  // Weighted by utterance duration: a long angry sentence should outweigh a clipped "ok".
+  const sentimentBySpeaker = useMemo(() => {
+    const acc = new Map<string, {
+      sum: number; weight: number; counts: Record<string, number>;
+      moods: Record<string, number>; n: number;
+      top: { text: string; score: number } | null;
+      bottom: { text: string; score: number } | null;
+    }>();
+    for (const u of result?.utterances || []) {
+      if (!u.local_label) continue;
+      const e = acc.get(u.local_label) ?? {
+        sum: 0, weight: 0, counts: { negative: 0, neutral: 0, positive: 0 },
+        moods: { calm: 0, stressed: 0, tired: 0 }, n: 0, top: null, bottom: null,
+      };
+      if (u.sentiment_score != null) {
+        const w = Math.max((u.end_s ?? 0) - (u.start_s ?? 0), 0.1);
+        e.sum += u.sentiment_score * w;
+        e.weight += w;
+        e.n += 1;
+        if (u.sentiment) e.counts[u.sentiment] = (e.counts[u.sentiment] ?? 0) + 1;
+        if (!e.top || u.sentiment_score > e.top.score) e.top = { text: u.text, score: u.sentiment_score };
+        if (!e.bottom || u.sentiment_score < e.bottom.score) e.bottom = { text: u.text, score: u.sentiment_score };
+      }
+      if (u.mood) e.moods[u.mood] = (e.moods[u.mood] ?? 0) + 1;
+      acc.set(u.local_label, e);
+    }
+    return acc;
   }, [result]);
 
   const activeUtteranceId = useMemo(() => {
@@ -217,6 +256,48 @@ export default function ClipDetail() {
                     <span className="text-xs tabular-nums text-muted-foreground">{((s.talk_share || 0) * 100).toFixed(0)}% talk</span>
                     <span className="text-xs tabular-nums text-muted-foreground">· reliability {(s.reliability || 0).toFixed(2)}</span>
                   </div>
+                  {(() => {
+                    const sen = sentimentBySpeaker.get(s.local_label);
+                    if (!sen || !sen.weight) return null;
+                    const avg = sen.sum / sen.weight;
+                    const label = avg > 0.2 ? "positive" : avg < -0.2 ? "negative" : "neutral";
+                    const total = sen.counts.negative + sen.counts.neutral + sen.counts.positive || 1;
+                    const stressed = sen.moods.stressed || 0;
+                    return (
+                      <div className="space-y-1.5 pt-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className={cn("rounded-full px-2 py-0 text-[11px] capitalize", SENTIMENT_STYLE[label])}>
+                            {label} <span className="ml-1 tabular-nums opacity-70">{avg > 0 ? "+" : ""}{avg.toFixed(2)}</span>
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">
+                            over {sen.n} utterance{sen.n === 1 ? "" : "s"}
+                          </span>
+                          {stressed > 0 && (
+                            <span className="text-[10px] uppercase tracking-wide text-warning">
+                              {stressed} stressed
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex h-1.5 w-56 overflow-hidden rounded-full">
+                          <div className="bg-destructive" style={{ width: `${(sen.counts.negative / total) * 100}%` }} />
+                          <div className="bg-muted-foreground/40" style={{ width: `${(sen.counts.neutral / total) * 100}%` }} />
+                          <div className="bg-success" style={{ width: `${(sen.counts.positive / total) * 100}%` }} />
+                        </div>
+                        {/* the single strongest line each way says more about how this person
+                            sounded than the average does, and it's evidence for the number */}
+                        {sen.bottom && sen.bottom.score <= -0.2 && (
+                          <p className="truncate text-xs text-destructive/90" title={sen.bottom.text}>
+                            ↓ “{sen.bottom.text}”
+                          </p>
+                        )}
+                        {sen.top && sen.top.score >= 0.2 && (
+                          <p className="truncate text-xs text-success/90" title={sen.top.text}>
+                            ↑ “{sen.top.text}”
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {assigning === s.local_label ? (
@@ -272,9 +353,27 @@ export default function ClipDetail() {
                   )}>
                     {displayName(u.local_label)}
                   </span>
+                  {/* text sentiment and acoustic mood side by side, never merged into one
+                      number: "calm words, stressed delivery" is the interesting case and
+                      averaging the two would hide exactly that */}
+                  {(u.sentiment || u.mood) && (
+                    <span className="mt-1 flex h-fit shrink-0 items-center gap-1.5">
+                      {u.sentiment && u.sentiment !== "neutral" && (
+                        <span className={cn("text-[10px] tabular-nums",
+                          u.sentiment === "positive" ? "text-success" : "text-destructive")}>
+                          {u.sentiment_score > 0 ? "+" : ""}{u.sentiment_score?.toFixed(2)}
+                        </span>
+                      )}
+                      {u.mood && u.mood !== "calm" && (
+                        <span className="text-[10px] uppercase tracking-wide text-warning">{u.mood}</span>
+                      )}
+                    </span>
+                  )}
                   <p
-                    className="leading-relaxed"
-                    title={`word conf ${u.mean_word_conf?.toFixed(2)} · speaker conf ${u.mean_speaker_conf?.toFixed(2)}`}
+                    className="flex-1 leading-relaxed"
+                    title={`word conf ${u.mean_word_conf?.toFixed(2)} · speaker conf ${u.mean_speaker_conf?.toFixed(2)}`
+                      + (u.text_sentiment ? ` · text ${u.text_sentiment} ${u.text_score?.toFixed(2)}` : "")
+                      + (u.mood ? ` · voice ${u.mood}` : "")}
                   >
                     {words ? words.map((w: any, i: number) => {
                       const wordActive = active && currentTime >= w.start_s && currentTime < w.end_s;

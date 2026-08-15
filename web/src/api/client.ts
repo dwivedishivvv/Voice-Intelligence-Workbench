@@ -89,4 +89,28 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ recording_url, session_key, driver_number }),
     }),
+
+  listRaces: () => req("/v1/races"),
+  getRace: (id: string) => req(`/v1/races/${id}`),
+  raceUtterances: (id: string) => req(`/v1/races/${id}/utterances`),
+  deleteRace: (id: string) => req(`/v1/races/${id}`, { method: "DELETE" }),
+  createRace: (fields: Record<string, string>, svg: File | null) => {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(fields)) fd.append(k, v);
+    if (svg) fd.append("svg", svg);
+    return req("/v1/races", { method: "POST", body: fd });
+  },
+  nameRaceVoice: (raceId: string, clusterId: string, display_name: string) =>
+    req(`/v1/races/${raceId}/voices/${clusterId}/name`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name }),
+    }),
+  uploadRaceClip: (raceId: string, file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req(`/v1/races/${raceId}/clips`, { method: "POST", body: fd });
+  },
+  // the SVG route needs auth but is used as an <img>/fetch source, hence the ?key= form
+  raceSvgUrl: (id: string) => `/v1/races/${id}/svg?key=${encodeURIComponent(API_KEY)}`,
 };

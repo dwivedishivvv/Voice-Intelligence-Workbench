@@ -86,6 +86,21 @@ class ModelPool:
         self.text_embedder = SentenceTransformer(
             str(md / "text" / self.cfg.text_embed_model), device=self.device)
 
+        # Sentiment is the one optional model: it isn't in REGISTRY.yaml's required set, so a
+        # MODEL_DIR without it still yields a fully working pipeline (stages/sentiment.py
+        # no-ops and warns). Loaded here rather than per job for the same reason as the rest.
+        self.sentiment = self.sentiment_tokenizer = None
+        sent_dir = md / "sentiment" / self.cfg.sentiment_model
+        if sent_dir.exists():
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+            self.sentiment_tokenizer = AutoTokenizer.from_pretrained(str(sent_dir), local_files_only=True)
+            self.sentiment = AutoModelForSequenceClassification.from_pretrained(
+                str(sent_dir), local_files_only=True,
+                # fp16 halves both VRAM and latency for a classifier this size; the argmax
+                # label is unchanged by the precision drop, only the confidence's last digits
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            ).to(self.device).eval()
+
         await self.warmup()
         return int((time.perf_counter() - t0) * 1000)
 

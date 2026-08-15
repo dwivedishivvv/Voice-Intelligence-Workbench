@@ -3,7 +3,7 @@
 An on-premises voice-intelligence workbench. Drop in an audio or video clip (≤90s) and it
 runs a full offline pipeline — preprocess → transcribe → diarize → reconcile → embed →
 identify speakers → index — then lets you review, correct, search, and export the result.
-Models are baked into the worker image at build time and run with `HF_HUB_OFFLINE=1`:
+Models live on disk under `MODEL_DIR` and run with `HF_HUB_OFFLINE=1`:
 no audio and no text ever leaves the box.
 
 Three ways in: **batch upload**, **live microphone transcription**, and **Race Radio**, an
@@ -18,7 +18,7 @@ lap times.
 
 - [What it does](#what-it-does)
 - [Architecture](#architecture)
-- [Quick start (Docker)](#quick-start-docker)
+- [Quick start](#quick-start)
 - [Running natively on Windows](#running-natively-on-windows)
 - [The screens](#the-screens)
 - [The pipeline, stage by stage](#the-pipeline-stage-by-stage)
@@ -50,8 +50,10 @@ lap times.
 | Clustering | unknown voices cluster across clips; promote a cluster to a real profile in one click |
 | Calibration | EER sweep over enrolled data to sanity-check the identification threshold |
 | Search | Postgres FTS, semantic (MiniLM + pgvector HNSW), or hybrid via reciprocal rank fusion |
+| Sentiment | multilingual XLM-R over the transcript, fused with the acoustic tone read; stored per utterance and rolled up per speaker |
+| Races | group recordings by race, bulk upload, SVG track outline, per-voice filtering and analysis |
 | Export | SRT, VTT, RTTM, JSON, TXT |
-| Live | mic capture, pause-aligned chunking, per-chunk diarize + identify, session-scoped speakers |
+| Live | mic capture, pause-aligned chunking, transcript + tone read (no per-chunk speaker ID) |
 | Race Radio | OpenF1 session/driver/lap data, radio ingestion, heuristic tone classification |
 | Ops | structured logs with correlation IDs, Prometheus metrics, hash-chained audit log, deletion receipts |
 | Tuning | every pipeline knob editable live from the UI — applies to the next job, no restart |
@@ -82,18 +84,28 @@ lap times.
 - **redis** — arq job queue and the pub/sub channel behind live progress events.
 - **web** — React + Vite + TypeScript, Tailwind and shadcn/ui.
 
-## Quick start (Docker)
+## Quick start
 
-```bash
+Docker runs the datastores only. The api, worker and web servers run natively — they
+reload on edit, and it's the only way the worker can reach a local GPU.
+
+```powershell
 cp .env.example .env                  # edit POSTGRES_PASSWORD / API_KEY
 echo "<your-hf-token>" > .hf_token    # once — to accept pyannote's gated-model terms
-make up                               # docker compose up -d --build
+uv pip install -r api/pyproject.toml -r worker/pyproject.toml
+cd web; npm install; cd ..
+.\start.ps1                           # postgres + redis in docker, then api / worker / web
+.\start.ps1 -Stop -Down               # stop everything
 ```
 
-The worker image *build* downloads and verifies every model in `models/REGISTRY.yaml`. It
-fails the build — not the first request — if anything is missing.
+Then: web on `:5174`, API on `:8000`, Postgres on `:5432`, Redis on `:6379`.
 
-Then: web on `:5173`, API on `:8000`, Postgres on `:5432`, Redis on `:6379`.
+`start.ps1` prints the detected GPU at launch and warns if the worker's interpreter has a
+CPU-only torch — that silent fallback is otherwise invisible and costs you ~20x throughput.
+
+Models are expected on disk under `MODEL_DIR` (default `C:/models`), with the HF cache at
+`MODEL_DIR/.cache`. `start.ps1` points `HF_HOME` and `PYANNOTE_CACHE` there, which is what
+makes pyannote's nested repo-id references resolve with `HF_HUB_OFFLINE=1`.
 
 The web UI reads its API key from `localStorage`. Once, in the browser console:
 
@@ -104,11 +116,22 @@ localStorage.setItem("api_key", "<API_KEY from .env>")
 Other targets: `make down` (stop), `make clean` (stop + drop volumes), `make logs`,
 `make test`.
 
-Dependencies are managed with [uv](https://docs.astral.sh/uv/) — `api/pyproject.toml` and
-`worker/pyproject.toml` are installed via `uv pip install --system -r pyproject.toml`
-inside each Dockerfile.
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) — see `api/pyproject.toml`
+and `worker/pyproject.toml`. The worker needs Python 3.11 and a CUDA build of torch; the
+repo's `worker/.venv` is the interpreter `start.ps1` launches it with.
 
 ## Running natively on Windows
+
+There are two launchers, and they overlap — pick one:
+
+- **`start.ps1`** (repo root) — one command brings up datastores + all three servers in their
+  own windows, checks the GPU, and stops cleanly (it kills uvicorn's `--reload` child, which
+  otherwise keeps port 8000 and serves stale code). Uses `worker/.venv` for the worker.
+- **`scripts/dev.ps1`** — one terminal per component, more explicit, easier to read logs from.
+  Expects `.venv` and `.venv-worker` at the repo root.
+
+They want different venv layouts, so whichever you use, create the venvs it expects. Worth
+collapsing to one launcher.
 
 `scripts/dev.ps1` runs the Python side on the host and leaves Postgres/Redis in Docker —
 faster to iterate on, and the only way the worker can reach a local GPU. One terminal each:
@@ -440,7 +463,7 @@ docker compose exec worker env | grep OFFLINE     # HF_HUB_OFFLINE=1 / TRANSFORM
 docker compose logs worker | grep models_loaded   # models loaded from local disk only
 ```
 
-The worker Dockerfile fails the *build* if any model in `models/REGISTRY.yaml` is missing —
+`worker.pool.verify_models` runs at worker startup and raises if any model in `models/REGISTRY.yaml` is missing —
 see its `verify_models` step. The only outbound network calls in the whole system are the
 OpenF1 proxy and radio download in the optional Race Radio feature; the core pipeline makes
 none.
@@ -480,7 +503,7 @@ worker/
   worker/pool.py model pool, loaded once at startup
 web/             React/Vite/TS + Tailwind/shadcn — Library, Upload, Live, Race Radio, ClipDetail, Speakers, Settings
 db/init.sql      full schema (pgvector + FTS)
-models/          REGISTRY.yaml + prefetch.py, baked into the worker image
+models/          REGISTRY.yaml + prefetch.py, fetched into MODEL_DIR
 tests/unit/      reconciliation, reliability, diarization cleanup, device/model resolution
 scripts/dev.ps1  native Windows dev runner
 presentation/    deck source + screenshots
