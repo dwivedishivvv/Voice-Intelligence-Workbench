@@ -4,7 +4,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TYPE clip_status AS ENUM (
   'QUEUED','VALIDATING','PREPROCESSING','TRANSCRIBING','DIARIZING',
-  'RECONCILING','EMBEDDING','IDENTIFYING','POSTPROCESSING','INDEXING',
+  'RECONCILING','EMBEDDING','IDENTIFYING','POSTPROCESSING','SENTIMENT','INDEXING',
   'COMPLETE','FAILED','REJECTED','DEAD'
 );
 CREATE TYPE quality_grade AS ENUM ('good','fair','poor');
@@ -288,3 +288,7 @@ CREATE TABLE downloaded_models (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (category, repo_id)
 );
+
+-- Races + sentiment columns. Kept separate and idempotent so it can also be replayed
+-- against an already-initialized database (init.sql itself only runs on a fresh volume).
+\ir races.sql

@@ -8,6 +8,7 @@ import Library from "./pages/Library";
 import Upload from "./pages/Upload";
 import Live from "./pages/Live";
 import F1 from "./pages/F1";
+import Races from "./pages/Races";
 import ClipDetail from "./pages/ClipDetail";
 import Speakers from "./pages/Speakers";
 import Settings from "./pages/Settings";
@@ -22,6 +23,7 @@ function App() {
           <Route path="/upload" element={<Upload />} />
           <Route path="/live" element={<Live />} />
           <Route path="/f1" element={<F1 />} />
+          <Route path="/races" element={<Races />} />
           <Route path="/clips/:id" element={<ClipDetail />} />
           <Route path="/speakers" element={<Speakers />} />
           <Route path="/settings" element={<Settings />} />

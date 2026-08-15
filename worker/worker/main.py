@@ -16,7 +16,6 @@ from .pipeline import process_clip
 from .events import init_events, emit_live, emit_f1_result
 from .stages.transcribe import compression_ratio, BOILERPLATE
 from .audio import tone as tone_mod
-from . import live as live_mod
 
 log = structlog.get_logger()
 
@@ -33,12 +32,21 @@ async def startup(ctx):
     await init_events(cfg.redis_url)
     ctx["pool"] = ModelPool(cfg)
     load_ms = await ctx["pool"].load()
-    ctx["gpu_sem"] = asyncio.Semaphore(cfg.worker_concurrency)
-    # CPU-only whisper/pyannote calls already saturate every core by themselves — running
-    # two concurrently doesn't parallelize, it thrashes (each ~2-4x slower), which is fatal
-    # for live chunks where a growing backlog means falling further behind in real time.
-    # One dedicated lane keeps each chunk fast so the queue actually drains.
-    ctx["live_sem"] = asyncio.Semaphore(1 if ctx["pool"].device == "cpu" else cfg.worker_concurrency)
+    # ONE lane through the model pool, shared by every job type. ModelPool is a single
+    # shared instance and neither of its two big models is safe to call concurrently:
+    # pyannote's SpeakerDiarization pipeline carries per-call internal state, and the
+    # CTranslate2 Whisper model is built with num_workers=1. Two jobs entering either one
+    # from different threads corrupted the process heap (Windows 0xc0000374, no Python
+    # traceback — the worker just vanished mid-batch, leaving clips stuck in PREPROCESSING).
+    #
+    # This was previously two independent semaphores (gpu_sem sized to worker_concurrency,
+    # live_sem to 1 on CPU), which meant a live chunk and a batch clip could still overlap
+    # inside the same models even when each semaphore was individually satisfied.
+    #
+    # Serializing costs little: the GPU is the bottleneck, so concurrent jobs were taking
+    # turns on it anyway. To actually process clips in parallel you need one ModelPool per
+    # worker process (run N workers), not N threads sharing one pool.
+    ctx["gpu_sem"] = ctx["live_sem"] = asyncio.Semaphore(1)
     # per-session language lock + periodic recheck state (see LIVE_LANG_RECHECK_EVERY) —
     # a fresh chunk re-guessing language from scratch every time is unstable on that little audio
     ctx["live_lang"] = {}
@@ -46,9 +54,6 @@ async def startup(ctx):
     # F1 radio, f"{session_key}:{driver_number}" so a driver's calls across a race calibrate
     # against each other instead of a fixed global pitch/rate cutoff
     ctx["tone_baseline"] = {}
-    # per-session in-memory local-speaker centroids for live diarization (see live.py) —
-    # unenrolled voices get a stable "Speaker N" label within one session, not a real profile
-    ctx["live_speakers"] = {}
     log.info("worker_ready", device=ctx["pool"].device, models=ctx["pool"].versions, load_ms=load_ms)
 
 
@@ -92,13 +97,12 @@ def _is_hallucination(text: str, avg_logprob: float, no_speech_prob: float) -> b
 
 
 async def transcribe_live_chunk_job(ctx, session_id: str, chunk_rel_path: str, seq: int):
-    # denoise is still skipped (that's the one that ate 260ms/s of audio in the batch run) —
-    # but diarization/embedding/identification now run per chunk too (see live.py); GPU
-    # headroom easily covers it and it's the only way to show who's speaking live
+    # transcript + tone only. Denoise is skipped (260ms/s of audio in the batch run), and so
+    # is diarization/speaker-ID — per-chunk speaker reads were never stable enough on a few
+    # seconds of audio to be worth their latency. Upload the recording for real speaker work.
     cfg = get_settings()
     path = storage.resolve(cfg, chunk_rel_path)
     text, mood, features, error = "", "calm", tone_mod.NEUTRAL_FEATURES, None
-    segments_out: list = []
 
     pinned = None if cfg.asr_language == "auto" else cfg.asr_language
     lang_state = None
@@ -120,22 +124,15 @@ async def transcribe_live_chunk_job(ctx, session_id: str, chunk_rel_path: str, s
             # ASR and tone analysis are independent signals from the same audio — a whisper
             # hiccup (vad_filter finding 0 speech in a short/quiet chunk) shouldn't also
             # blank out the tone read, and vice versa (see analyze_f1_radio_job, same pattern)
-            words: list = []
             try:
                 asr_segments, info = await asyncio.to_thread(
                     ctx["pool"].asr.transcribe, audio, language=lang_arg, beam_size=cfg.asr_beam_size,
-                    word_timestamps=True, condition_on_previous_text=False,
+                    word_timestamps=False, condition_on_previous_text=False,
                     temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
                     compression_ratio_threshold=2.4, log_prob_threshold=-1.0,
                     no_speech_threshold=0.6, vad_filter=True)
-                segs = []
-                for s in asr_segments:
-                    st = {"text": s.text.strip(), "avg_logprob": s.avg_logprob, "no_speech_prob": s.no_speech_prob}
-                    segs.append(st)
-                    if not _is_hallucination(st["text"], st["avg_logprob"], st["no_speech_prob"]):
-                        for w in (s.words or []):
-                            words.append({"word": w.word.strip(), "start": w.start, "end": w.end,
-                                          "probability": w.probability})
+                segs = [{"text": s.text.strip(), "avg_logprob": s.avg_logprob, "no_speech_prob": s.no_speech_prob}
+                        for s in asr_segments]
                 text = " ".join(s["text"] for s in segs
                                  if not _is_hallucination(s["text"], s["avg_logprob"], s["no_speech_prob"])).strip()
                 if lang_state is not None and info.language_probability > 0.6:
@@ -145,16 +142,6 @@ async def transcribe_live_chunk_job(ctx, session_id: str, chunk_rel_path: str, s
                 # duration calc does max() on the (now empty) speech-chunk list — not a real error
                 if "empty sequence" not in str(e):
                     raise
-
-            if words:
-                # diarization is a separate signal from the transcript itself — a diarization
-                # hiccup shouldn't blank out the (already-good) transcript text, so this only
-                # ever *adds* per-speaker segmentation on top, never replaces `text` on failure
-                try:
-                    session_speakers = ctx["live_speakers"].setdefault(session_id, [])
-                    segments_out = await live_mod.diarize_and_label(ctx["pool"], cfg, audio, words, session_speakers)
-                except Exception as e:
-                    log.warning("live_diarize_failed", session_id=session_id, seq=seq, error=str(e)[:200])
 
             # a mood reading needs actual words behind it — acoustic-only features (pitch,
             # energy) still "detect" tone on background noise/breathing when ASR found
@@ -174,7 +161,7 @@ async def transcribe_live_chunk_job(ctx, session_id: str, chunk_rel_path: str, s
             os.remove(path)
         except OSError:
             pass
-    await emit_live(session_id, seq, text, mood, features, segments_out, error)
+    await emit_live(session_id, seq, text, mood, features, error)
 
 
 async def analyze_f1_radio_job(ctx, job_id: str, rel_path: str, session_key: int | None = None,

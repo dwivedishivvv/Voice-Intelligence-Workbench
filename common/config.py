@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     diar_model: str = "pyannote-3.1"
     embed_model: str = "ecapa"
     text_embed_model: str = "minilm"
+    sentiment_model: str = "xlmr-sentiment"
     hf_hub_offline: int = 1
     transformers_offline: int = 1
 
@@ -85,7 +86,11 @@ class Settings(BaseSettings):
     vad_min_speech_ms: int = 200
     vad_min_silence_ms: int = 150
     vad_speech_pad_ms: int = 100
-    min_total_speech_s: float = 1.0
+    # A whole radio call is often shorter than a second ("Box, box.", "Copy that."). At a
+    # 1.0s floor those were rejected as NO_SPEECH_DETECTED despite VAD finding real speech
+    # in them — one test clip had 0.96s of detected speech and was thrown away. 0.5s still
+    # rejects the genuinely empty ones (VAD returns 0.00s on those, not 0.6s).
+    min_total_speech_s: float = 0.5
 
     quality_good_snr_db: float = 18.0
     quality_fair_snr_db: float = 10.0
@@ -107,12 +112,24 @@ class Settings(BaseSettings):
     reliability_fair: float = 0.45
     reliability_poor: float = 0.20
 
-    id_threshold: float = 0.68
+    # Calibrated on 70 F1 team-radio clips (median 3.9s of speech per speaker, heavily
+    # compressed) against ground-truth driver labels. ECAPA separates these voices well
+    # — same-speaker cosine averaged 0.52, different-speaker 0.15 — but a single short,
+    # band-limited embedding never reaches the ~0.75 a clean long-form recording does.
+    # At the previous cluster_threshold of 0.76 the same driver re-clustered as a new
+    # person 95% of the time (59 clusters out of 65 assignments), which makes cross-clip
+    # identity useless. 0.52 recovers 59% of same-speaker pairs while merging different
+    # speakers 0.3% of the time — deliberately biased toward "unknown" over a wrong name.
+    #
+    # These are the right numbers for short radio-style audio, not universal constants.
+    # POST /v1/admin/calibrate re-derives them from your own enrolled profiles (EER) once
+    # you have >=3 profiles with >=2 enrollments each; prefer that over these defaults.
+    id_threshold: float = 0.55
     id_suggest_delta: float = 0.08
     id_min_margin: float = 0.04
     id_threshold_penalty: float = 0.10
-    verify_threshold: float = 0.74
-    cluster_threshold: float = 0.76
+    verify_threshold: float = 0.62
+    cluster_threshold: float = 0.52
     auto_enroll: bool = False
     auto_enroll_min_sim: float = 0.85
     auto_enroll_min_reliability: float = 0.75

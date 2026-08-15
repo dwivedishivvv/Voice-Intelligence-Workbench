@@ -9,7 +9,7 @@ from .ctx import Ctx
 from .errors import RejectError
 from .events import emit
 from .stages import (validate, preprocess, transcribe, diarize, reconcile,
-                      embed, identify, postprocess, index)
+                      embed, identify, postprocess, sentiment, index)
 
 PIPELINE_VERSION = os.environ.get("PIPELINE_VERSION", "dev")
 
@@ -22,6 +22,7 @@ STAGES = [
     ("EMBEDDING", embed.run),
     ("IDENTIFYING", identify.run),
     ("POSTPROCESSING", postprocess.run),
+    ("SENTIMENT", sentiment.run),
     ("INDEXING", index.run),
 ]
 
@@ -29,8 +30,9 @@ STAGES = [
 # Fixed weights rather than live-averaged timings: simpler, and "roughly right" is all a
 # progress bar needs — an ETA that's occasionally 20% off beats no ETA at all.
 STAGE_WEIGHTS = {
-    "VALIDATING": 2, "PREPROCESSING": 15, "TRANSCRIBING": 35, "DIARIZING": 25,
-    "RECONCILING": 3, "EMBEDDING": 5, "IDENTIFYING": 3, "POSTPROCESSING": 5, "INDEXING": 7,
+    "VALIDATING": 2, "PREPROCESSING": 14, "TRANSCRIBING": 33, "DIARIZING": 23,
+    "RECONCILING": 3, "EMBEDDING": 5, "IDENTIFYING": 3, "POSTPROCESSING": 5,
+    "SENTIMENT": 7, "INDEXING": 5,
 }
 _CUM_BEFORE = {}
 _running = 0
@@ -51,6 +53,12 @@ _DERIVED_TABLES = ["quality_metrics", "vad_regions", "speaker_turns", "transcrip
 async def _reset_derived_data(clip_id: str):
     for table in _DERIVED_TABLES:
         await db.execute(f"DELETE FROM {table} WHERE clip_id=$1", clip_id)
+    # The clip-level sentiment rollup lives in columns on clips, not in one of the tables
+    # above, so it survived a rerun. A clip that processed fine once and is REJECTED the
+    # next time kept displaying its old sentiment badge next to "no speech" — stale
+    # analysis presented as current. Clear it here, with everything else derived.
+    await db.execute(
+        "UPDATE clips SET sentiment=NULL, sentiment_score=NULL, mood=NULL WHERE id=$1", clip_id)
 
 
 async def process_clip(clip_id: str, pool, cfg):

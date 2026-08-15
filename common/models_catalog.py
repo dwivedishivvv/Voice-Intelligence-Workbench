@@ -59,6 +59,18 @@ CATALOG = {
              "label": "Multilingual MPNet", "note": "768-dim, higher quality, ~3x slower than MiniLM."},
         ],
     },
+    "sentiment": {
+        "settings_field": "sentiment_model",
+        "gated": False,
+        "options": [
+            {"repo_id": "cardiffnlp/twitter-xlm-roberta-base-sentiment", "dir_name": "xlmr-sentiment",
+             "label": "XLM-R Sentiment", "note": "Default. Multilingual, 3-class, ~1.1GB."},
+            {"repo_id": "cardiffnlp/twitter-roberta-base-sentiment-latest", "dir_name": "roberta-sentiment-en",
+             "label": "RoBERTa Sentiment (English)", "note": "~500MB, more accurate on English, English-only."},
+            {"repo_id": "tabularisai/multilingual-sentiment-analysis", "dir_name": "distil-sentiment-5class",
+             "label": "5-class Multilingual", "note": "Very negative to very positive. Smaller and faster; label set is remapped to 3 classes."},
+        ],
+    },
 }
 
 

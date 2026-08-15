@@ -2,38 +2,33 @@
 
 Offline audio pipeline: upload a clip (≤90s) → preprocess → transcribe (faster-whisper) →
 diarize (pyannote 3.1) → reconcile → embed + identify speakers (ECAPA + pgvector) →
-search/export. Everything runs on-premises; models are baked into the worker image at
-build time (`HF_HUB_OFFLINE=1`).
+search/export. Everything runs on-premises; models live on disk under `MODEL_DIR`
+(`HF_HUB_OFFLINE=1`).
 
 ## Run it
 
-```bash
+Docker runs the datastores only. The api, worker and web servers run natively so
+they reload on edit.
+
+```powershell
 cp .env.example .env        # edit POSTGRES_PASSWORD / API_KEY
-echo "<your-hf-token>" > .hf_token   # needed once, to accept pyannote's gated-model terms
-make up
+uv pip install -r api/pyproject.toml -r worker/pyproject.toml
+cd web; npm install; cd ..
+.\start.ps1                 # postgres + redis in docker, then api / worker / web natively
+.\start.ps1 -Stop -Down     # stop everything
 ```
 
-Deps are managed with [uv](https://docs.astral.sh/uv/) — `api/pyproject.toml` and
-`worker/pyproject.toml` are installed via `uv pip install --system -r pyproject.toml`
-inside each Dockerfile. For local (non-Docker) dev:
+Then: API on `:8000`, web on `:5174`, Postgres on `:5432`, Redis on `:6379`.
 
-```bash
-uv pip install -r worker/pyproject.toml   # or api/pyproject.toml
-uv pip install pytest
-make test
-```
-
-Then: API on `:8000`, web on `:5173`, Postgres on `:5432`.
+Models are expected under `MODEL_DIR` (default `C:/models`) with the HF cache at
+`MODEL_DIR/.cache` — `start.ps1` points `HF_HOME` and `PYANNOTE_CACHE` there, which is
+what makes pyannote's nested repo-id refs resolve without network.
 
 ## Offline verification
 
-```bash
-docker compose exec worker env | grep OFFLINE   # HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1
-docker compose logs worker | grep models_loaded  # confirms models loaded from local disk only
-```
-
-The worker Dockerfile fails the *build* (not the first request) if any model in
-`models/REGISTRY.yaml` is missing — see `worker/Dockerfile`'s `verify_models` step.
+`worker.pool.verify_models` runs at worker startup and raises if any model in
+`worker/models/REGISTRY.yaml` is missing; the `models_loaded` log line confirms every
+model came from local disk.
 
 ## What's scoped out (and where the seam is)
 

@@ -66,9 +66,9 @@ def _hf_token() -> str | None:
 def _do_download(category: str, repo_id: str, dir_name: str, gated: bool):
     from huggingface_hub import snapshot_download
     cfg = get_settings()
-    dest = Path(cfg.model_dir) / ("diar" if category == "diarization" else
-                                   "asr" if category == "asr" else
-                                   "embed" if category == "embedding" else "text") / dir_name
+    subdir = {"diarization": "diar", "asr": "asr", "embedding": "embed",
+              "sentiment": "sentiment", "text_embedding": "text"}[category]
+    dest = Path(cfg.model_dir) / subdir / dir_name
     snapshot_download(repo_id=repo_id, local_dir=str(dest), token=_hf_token() if gated else None,
                        max_workers=4)
 

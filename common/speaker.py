@@ -162,10 +162,15 @@ async def promote_cluster(cluster_id: str, name: str, cfg) -> str:
             await db.insert("speaker_enrollments", {
                 "profile_id": pid, "clip_id": m["clip_id"], "embedding": m["embedding"],
                 "duration_s": m["speech_s"], "reliability": m["reliability"], "source": "promoted"})
-    await db.execute("UPDATE clip_speakers SET profile_id=$2, cluster_id=NULL WHERE cluster_id=$1", cluster_id, pid)
+    # Order matters: the utterances UPDATE finds its rows *through* clip_speakers.cluster_id,
+    # so it has to run while that column still holds the cluster. Clearing clip_speakers
+    # first (as this did) left the second statement matching zero rows every time, so a
+    # promoted cluster got its name on clip_speakers but never on its utterances — the
+    # transcript kept showing the voice as unnamed no matter how many times you named it.
     await db.execute(
         """UPDATE utterances u SET profile_id=$2 FROM clip_speakers cs
            WHERE cs.cluster_id=$1 AND u.clip_id=cs.clip_id AND u.local_label=cs.local_label""", cluster_id, pid)
+    await db.execute("UPDATE clip_speakers SET profile_id=$2, cluster_id=NULL WHERE cluster_id=$1", cluster_id, pid)
     await db.execute("UPDATE speaker_clusters SET promoted_to=$2 WHERE id=$1", cluster_id, pid)
     await recompute_centroid(pid)
     return pid
