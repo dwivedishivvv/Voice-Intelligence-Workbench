@@ -41,6 +41,11 @@ export const api = {
   listSpeakers: () => req("/v1/speakers"),
   getSpeaker: (id: string) => req(`/v1/speakers/${id}`),
   listClusters: () => req("/v1/clusters"),
+  getCluster: (id: string) => req(`/v1/clusters/${id}`),
+  // <audio src> can't carry an Authorization header, hence the ?key= form get_current_user
+  // also accepts. First hit stitches the montage with ffmpeg; later hits are served cached.
+  clusterMontageUrl: (id: string) =>
+    `/v1/clusters/${id}/montage?key=${encodeURIComponent(API_KEY)}`,
   promoteCluster: (id: string, display_name: string) =>
     req(`/v1/clusters/${id}/promote`, {
       method: "POST",

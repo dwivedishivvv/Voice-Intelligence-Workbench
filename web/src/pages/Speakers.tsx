@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
@@ -8,13 +8,59 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Users, Fingerprint, Check, X } from "lucide-react";
+import { Users, Fingerprint, Check, X, Play, Square, Loader2, AudioLines } from "lucide-react";
 
 export default function Speakers() {
   const [speakers, setSpeakers] = useState<any[] | null>(null);
   const [clusters, setClusters] = useState<any[] | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
   const [name, setName] = useState("");
+  // montage playback state: which cluster is loading, which is playing, and what the
+  // stitched result turned out to be (segments/seconds, read off the response headers)
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [info, setInfo] = useState<Record<string, { segments: number; seconds: number; clips: number }>>({});
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // one montage at a time — two voices overlapping is exactly what makes a cluster
+  // unrecognisable, which is the problem this feature exists to solve
+  function stop() {
+    audioRef.current?.pause();
+    audioRef.current = null;
+    setPlayingId(null);
+  }
+  useEffect(() => stop, []);
+
+  async function playMontage(id: string) {
+    if (playingId === id) return stop();
+    stop();
+    setLoadingId(id);
+    try {
+      // fetched rather than pointed at directly so the first (slow, stitching) request has
+      // a spinner and a 404 "nothing usable here" can be explained instead of failing mutely
+      const res = await fetch(api.clusterMontageUrl(id));
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.detail || `montage unavailable (${res.status})`);
+      }
+      setInfo((m) => ({ ...m, [id]: {
+        segments: Number(res.headers.get("X-Montage-Segments") || 0),
+        seconds: Number(res.headers.get("X-Montage-Seconds") || 0),
+        clips: Number(res.headers.get("X-Montage-Clips") || 0),
+      } }));
+      const url = URL.createObjectURL(await res.blob());
+      const el = new Audio(url);
+      el.onended = () => { URL.revokeObjectURL(url); setPlayingId(null); };
+      el.onerror = () => { toast.error("Could not play that montage"); setPlayingId(null); };
+      audioRef.current = el;
+      await el.play();
+      setPlayingId(id);
+    } catch (e) {
+      toast.error(String((e as Error).message));
+    } finally {
+      setLoadingId(null);
+    }
+  }
 
   async function load() {
     setSpeakers((await api.listSpeakers()).items);
@@ -84,7 +130,11 @@ export default function Speakers() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base"><Fingerprint className="size-4" /> Unclaimed clusters</CardTitle>
-            <CardDescription>Voices the system has grouped together but hasn't matched to a named speaker.</CardDescription>
+            <CardDescription>
+              Voices the system has grouped together but hasn't matched to a named speaker.
+              Play one to hear that speaker's own words stitched from every clip they appear
+              in — then name them without leaving the page.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {clusters === null ? (
@@ -98,6 +148,7 @@ export default function Speakers() {
                     <TableHead>Label</TableHead>
                     <TableHead>Members</TableHead>
                     <TableHead>Speech</TableHead>
+                    <TableHead>Listen</TableHead>
                     <TableHead className="text-right">Action</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -107,6 +158,28 @@ export default function Speakers() {
                       <TableCell className="font-medium">{c.label}</TableCell>
                       <TableCell className="tabular-nums">{c.n_members}</TableCell>
                       <TableCell className="tabular-nums text-muted-foreground">{c.total_speech_s?.toFixed(1)}s</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant={playingId === c.id ? "secondary" : "outline"}
+                            size="sm"
+                            className="gap-1.5"
+                            disabled={loadingId === c.id}
+                            onClick={() => playMontage(c.id)}
+                          >
+                            {loadingId === c.id ? <Loader2 className="size-3.5 animate-spin" />
+                              : playingId === c.id ? <Square className="size-3 fill-current" />
+                              : <Play className="size-3.5" />}
+                            {playingId === c.id ? "Stop" : "Montage"}
+                          </Button>
+                          {info[c.id] && (
+                            <span className="flex items-center gap-1 text-xs tabular-nums text-muted-foreground">
+                              <AudioLines className="size-3" />
+                              {info[c.id].segments} segs · {info[c.id].seconds.toFixed(0)}s · {info[c.id].clips} clips
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
                       <TableCell className="text-right">
                         {promoting === c.id ? (
                           <div className="flex items-center justify-end gap-1.5">
