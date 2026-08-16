@@ -47,3 +47,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS speech_events_radio_uniq
   ON speech_events (radio_call_id, event_type) WHERE radio_call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS speech_events_type ON speech_events (event_type);
 CREATE INDEX IF NOT EXISTS speech_events_family ON speech_events (family);
+
+-- Which pass wrote the row. The embedding pass is cheap, on-box and recall-oriented; the
+-- LLM pass is slower, leaves the box, and is there for precision. Knowing which one made a
+-- claim is what lets you trust them differently — and what lets a re-run replace one
+-- without touching the other.
+ALTER TABLE speech_events ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'embedding';
+-- The model's own words for why. Kept because a wrong edge with a stated reason is
+-- debuggable and a wrong edge without one is just noise.
+ALTER TABLE speech_events ADD COLUMN IF NOT EXISTS rationale TEXT;

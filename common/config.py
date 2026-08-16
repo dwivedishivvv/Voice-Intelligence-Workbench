@@ -22,7 +22,8 @@ TUNABLE_FIELDS = {
     "auto_enroll_min_reliability", "retention_days", "asr_beam_size", "asr_language",
     "job_timeout_s", "job_max_attempts",
     "graph_lap_match_tolerance_s", "ontrack_min_similarity", "ontrack_min_margin",
-    "ontrack_min_words",
+    "ontrack_min_words", "ontrack_llm_enabled", "ontrack_candidate_similarity",
+    "ontrack_llm_batch", "ontrack_llm_min_confidence",
 }
 
 # The agent's own configuration: provider, model, key, and the switch that decides whether
@@ -76,7 +77,8 @@ SETTINGS_CATEGORIES = {
     "Jobs & retention": ["job_timeout_s", "job_max_attempts", "retention_days"],
     # Unlike the rest, this one applies to the next *graph sync* rather than the next job.
     "Graph": ["graph_lap_match_tolerance_s", "ontrack_min_similarity", "ontrack_min_margin",
-               "ontrack_min_words"],
+               "ontrack_min_words", "ontrack_llm_enabled", "ontrack_candidate_similarity",
+               "ontrack_llm_batch", "ontrack_llm_min_confidence"],
 }
 
 
@@ -127,6 +129,20 @@ class Settings(BaseSettings):
     # substance. Costs a few genuine short calls ("I went off.") — a trade worth making
     # when the output becomes a graph edge a model will read as fact.
     ontrack_min_words: int = 6
+    # Refining the embedding pass with the configured model. OFF BY DEFAULT and separate
+    # from llm_enabled: Ask sends text off-box because a person asked a question and is
+    # waiting for the answer, while this runs over stored corpus text in the background.
+    # Same data leaving the same way, a different thing to consent to.
+    ontrack_llm_enabled: bool = False
+    # The bar for *reaching* the model. Lower than ontrack_min_similarity on purpose: the
+    # embedding pass is the candidate generator here, so it is tuned for recall and the
+    # model does the rejecting. Everything below this stays on the box entirely.
+    ontrack_candidate_similarity: float = 0.42
+    # Lines per request. Larger batches cost fewer round trips and give the model more
+    # chances to lose track of the numbering; 10 held up on this corpus.
+    ontrack_llm_batch: int = 10
+    # A label the model itself is unsure of is not worth an edge a reader will trust.
+    ontrack_llm_min_confidence: float = 0.6
     # GRAPH_* rather than NEO4J_*: the neo4j container reads every NEO4J_-prefixed
     # variable in its environment as a server config setting and refuses to start on one
     # it doesn't recognise. Sharing that prefix with the client's own connection settings
@@ -170,7 +186,9 @@ class Settings(BaseSettings):
 
     # Literal, not str: this is settable from the Settings page, so a typo would otherwise
     # be stored happily and only surface as a crashed worker on the next restart.
-    device: Literal["auto", "cpu", "cuda"] = "auto"
+    # default cuda, not auto: resolve_device already falls back to cpu when there's no
+    # usable GPU, so this only changes which one you have to say out loud.
+    device: Literal["auto", "cpu", "cuda"] = "cuda"
     precision: str = "int8"
     worker_concurrency: int = 2
     job_timeout_s: int = 300

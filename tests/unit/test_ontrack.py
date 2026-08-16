@@ -120,3 +120,80 @@ def test_events_are_worded_as_readings_never_as_facts():
         text = ontrack.phrase(ontrack.Reading(e.name, e.family, 0.7, 0.1))
         assert text.startswith("reads as ")
         assert " was " not in text and " did " not in text
+
+
+# --- the LLM pass's contract ---------------------------------------------------
+#
+# The model is asked to label, never to invent. Everything below is a way of not trusting
+# its reply: a label outside the vocabulary, an index pointing past the batch, a confidence
+# below the bar and "none" all have to drop the row rather than be coerced into an edge.
+
+def test_prompt_offers_only_the_real_vocabulary():
+    """A prompt that drifts from the taxonomy produces labels the database discards
+    silently — the model looks like it answered and nothing is stored."""
+    prompt = ontrack.build_prompt(["anything"])
+    for e in ontrack.EVENT_TYPES:
+        assert e.name in prompt
+
+
+def test_prompt_numbers_lines_so_replies_match_by_position():
+    prompt = ontrack.build_prompt(["first line", "second line"])
+    assert "1. first line" in prompt and "2. second line" in prompt
+
+
+def test_prompt_teaches_the_failure_cases_measured_on_this_corpus():
+    """These three are not hypothetical: the embedding pass read "Head down." as a
+    completed overtake, "the car is snappy" as dirty air, and a sentence about pitting as
+    a pass. The prompt names them because they are what the model is there to catch."""
+    prompt = ontrack.build_prompt(["x"]).lower()
+    assert "head down" in prompt and "snappy" in prompt
+    assert "none" in prompt
+
+
+def test_a_confirmed_verdict_is_read():
+    out = ontrack.parse_verdicts(
+        '[{"n": 1, "event": "contact", "other_car": "Norris", "confidence": 0.9, "why": "hit"}]',
+        batch_size=1, min_confidence=0.6)
+    assert out == [ontrack.Verdict(1, "contact", 0.9, "Norris", "hit")]
+
+
+def test_none_is_a_real_answer_not_a_row():
+    assert ontrack.parse_verdicts(
+        '[{"n": 1, "event": "none", "confidence": 0.9}]', 1, 0.6) == []
+
+
+def test_an_invented_event_type_is_discarded():
+    """A model asked for a closed vocabulary will still occasionally return something
+    plausible-sounding from outside it. Storing that would put a type in the graph that no
+    query knows and no renderer can word."""
+    assert ontrack.parse_verdicts(
+        '[{"n": 1, "event": "wheel_to_wheel_battle", "confidence": 0.99}]', 1, 0.6) == []
+
+
+def test_an_index_outside_the_batch_is_discarded():
+    """Verdicts are matched to lines by position. An index past the end would attach a
+    label to the wrong utterance — or crash on the lookup, which is the better of two bad
+    outcomes and still not one to allow."""
+    assert ontrack.parse_verdicts('[{"n": 7, "event": "spin", "confidence": 0.9}]', 3, 0.6) == []
+    assert ontrack.parse_verdicts('[{"n": 0, "event": "spin", "confidence": 0.9}]', 3, 0.6) == []
+
+
+def test_low_confidence_is_discarded():
+    assert ontrack.parse_verdicts(
+        '[{"n": 1, "event": "spin", "confidence": 0.3}]', 1, 0.6) == []
+
+
+def test_prose_around_the_json_is_tolerated():
+    """Models wrap JSON in explanation and fences whatever the instruction says."""
+    out = ontrack.parse_verdicts(
+        'Sure! Here are the labels:\n```json\n'
+        '[{"n": 1, "event": "traffic", "confidence": 0.8}]\n```\nHope that helps.',
+        1, 0.6)
+    assert len(out) == 1 and out[0].event_type == "traffic"
+
+
+@pytest.mark.parametrize("reply", ["", "no json here", "[", '{"n": 1}', "[1, 2, 3]"])
+def test_an_unreadable_reply_labels_nothing(reply):
+    """An unusable reply leaves the batch unlabelled, which is the same outcome as the
+    model saying "none" — no edge, rather than a guess."""
+    assert ontrack.parse_verdicts(reply, 5, 0.6) == []

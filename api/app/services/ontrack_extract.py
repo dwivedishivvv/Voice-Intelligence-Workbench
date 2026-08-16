@@ -106,6 +106,76 @@ SELECT rc.id AS speech_id, 'radio_call' AS kind, rc.text, rc.embedding,
 """
 
 
+async def candidates(cfg=None) -> list[dict]:
+    """Lines worth asking a model about.
+
+    The same scoring as extract(), read at the lower candidate bar and without the margin
+    or the winner: the model is going to decide the type, so narrowing to one here would
+    only pass on the embedding pass's mistakes. The length guard stays — a two-word
+    fragment is no more readable by a model than by a cosine.
+    """
+    cfg = cfg or await get_effective_settings()
+    matrix, owners = _exemplars()
+    rows = await db.fetch(SPEECH_SQL.format(only_new="", only_new_radio=""))
+
+    out = []
+    for row in rows:
+        if ontrack.too_short(row["text"], cfg.ontrack_min_words):
+            continue
+        vector = _vector(row["embedding"])
+        if vector is None or vector.size != matrix.shape[1]:
+            continue
+        scores = score_one(vector, matrix, owners)
+        best = max((v for k, v in scores.items() if k != ontrack.NONE), default=0.0)
+        if best >= cfg.ontrack_candidate_similarity:
+            out.append({"speech_id": row["speech_id"], "kind": row["kind"],
+                        "text": row["text"], "session_key": row["session_key"],
+                        "embedding_score": best})
+    return out
+
+
+async def store(rows: list[dict], source: str, cfg=None) -> dict:
+    """Write adjudicated rows, replacing whatever that source wrote before.
+
+    Scoped to the source so the two passes never silently overwrite each other: re-running
+    the LLM pass leaves embedding-only rows alone, and vice versa.
+    """
+    cfg = cfg or await get_effective_settings()
+    compiled = await _alias_matcher()
+    await db.execute("DELETE FROM speech_events WHERE source=$1", source)
+
+    by_type: dict[str, int] = {}
+    for row in rows:
+        # The model may name the other car in its own words; the alias table is what turns
+        # that into a driver number, so a name it invented resolves to nothing rather than
+        # to a driver who was never mentioned.
+        target = _target_driver(f"{row.get('other_car') or ''} {row['text']}",
+                                compiled, row["session_key"])
+        is_utterance = row["kind"] == "utterance"
+        await db.execute(
+            """INSERT INTO speech_events
+                 (utterance_id, radio_call_id, event_type, family, score, margin,
+                  target_driver_number, target_session_key, model, source, rationale)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               ON CONFLICT DO NOTHING""",
+            row["speech_id"] if is_utterance else None,
+            None if is_utterance else row["speech_id"],
+            row["event_type"], row["family"], row["score"], row.get("margin", 0.0),
+            target, row["session_key"] if target is not None else None,
+            cfg.llm_model or cfg.text_embed_model, source, row.get("why"))
+        by_type[row["event_type"]] = by_type.get(row["event_type"], 0) + 1
+    return {"events": sum(by_type.values()),
+            "by_type": dict(sorted(by_type.items(), key=lambda kv: -kv[1]))}
+
+
+def _vector(raw):
+    """pgvector comes back as its text form over asyncpg; parsing lives in one place."""
+    if raw is None:
+        return None
+    return (np.fromstring(raw.strip("[]"), sep=",", dtype=np.float32)
+            if isinstance(raw, str) else np.asarray(raw, dtype=np.float32))
+
+
 async def extract(force: bool = False) -> dict:
     """Read every unread piece of speech, store what clears the thresholds.
 
@@ -126,7 +196,7 @@ async def extract(force: bool = False) -> dict:
     rows = await db.fetch(sql)
 
     if force:
-        await db.execute("DELETE FROM speech_events")
+        await db.execute("DELETE FROM speech_events WHERE source='embedding'")
 
     by_type: dict[str, int] = {}
     read, declined = 0, 0
@@ -135,12 +205,8 @@ async def extract(force: bool = False) -> dict:
         if ontrack.too_short(row["text"], cfg.ontrack_min_words):
             declined += 1
             continue
-        # asyncpg hands a pgvector column back as its text form; parsing here keeps the
-        # pgvector round trip in one place rather than in every caller.
-        raw = row["embedding"]
-        vector = (np.fromstring(raw.strip("[]"), sep=",", dtype=np.float32)
-                  if isinstance(raw, str) else np.asarray(raw, dtype=np.float32))
-        if vector.size != matrix.shape[1]:
+        vector = _vector(row["embedding"])
+        if vector is None or vector.size != matrix.shape[1]:
             declined += 1
             continue
 
@@ -156,8 +222,8 @@ async def extract(force: bool = False) -> dict:
         await db.execute(
             """INSERT INTO speech_events
                  (utterance_id, radio_call_id, event_type, family, score, margin,
-                  target_driver_number, target_session_key, model)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                  target_driver_number, target_session_key, model, source)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'embedding')
                ON CONFLICT DO NOTHING""",
             row["speech_id"] if is_utterance else None,
             None if is_utterance else row["speech_id"],

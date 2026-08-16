@@ -10,7 +10,7 @@ from common.config import (get_settings, get_effective_settings, config_snapshot
                             Settings, TUNABLE_FIELDS, RESTART_TUNABLE_FIELDS,
                             SETTINGS_CATEGORIES, LLM_MODELS)
 from ..auth import get_current_user
-from ..services import agent as agent_svc, ontrack_extract
+from ..services import agent as agent_svc, ontrack_extract, ontrack_llm
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -228,6 +228,30 @@ async def extract_ontrack(force: bool = False, user=Depends(get_current_user)):
     result = await ontrack_extract.extract(force=force)
     await audit("ontrack.extract", "corpus", "speech_events", actor=user, after=result)
     return {**result, "radio_embedded": embedded}
+
+
+@router.post("/ontrack/refine")
+async def refine_ontrack(user=Depends(get_current_user)):
+    """Re-read the embedding pass's candidates with the configured model.
+
+    Similarity matches topic; the model reads the sentence. That is the whole gap this
+    closes — "Head down." is near a completed overtake in embedding space and obviously
+    encouragement to anything that can read it.
+
+    Sends corpus text off the box, so it needs both llm_enabled and ontrack_llm_enabled,
+    and only lines that already cleared the local candidate bar are sent. 503 when either
+    switch is off, like every other off-box path.
+    """
+    try:
+        cands = await ontrack_extract.candidates()
+        confirmed, failures = await ontrack_llm.adjudicate(cands)
+        stored = await ontrack_extract.store(confirmed, source="llm")
+    except agent_svc.LLMUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+    await audit("ontrack.refine", "corpus", "speech_events", actor=user,
+                 after={"candidates": len(cands), **stored})
+    return {"candidates": len(cands), "confirmed": len(confirmed),
+            "unread_batches": len(failures), "errors": failures[:3], **stored}
 
 
 @router.get("/graph/summary")

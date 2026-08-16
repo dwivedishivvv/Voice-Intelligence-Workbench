@@ -394,3 +394,103 @@ def phrase(reading: Reading) -> str:
     Hedged in the same way tone is, and for the same reason: this is a classifier over one
     sentence of ASR output from a compressed radio channel, not a marshal's report."""
     return f"reads as {BY_NAME[reading.event_type].reads_as} ({reading.score:.2f})"
+
+
+# ── LLM adjudication ────────────────────────────────────────────────────────────
+#
+# The embedding pass is a good candidate generator and a poor judge: it matches topic, not
+# proposition, so "this car is so hot to drive" lands near dirty air and "Head down." near
+# a completed pass. A model reading the actual sentence can tell the difference, and it is
+# the only thing available that can — that is the whole reason this second pass exists.
+#
+# It is a *filter over candidates*, never a scan of the corpus. Every line it sees has
+# already cleared a low similarity bar, which keeps the volume down and, more importantly,
+# keeps most of the corpus on the box: strategy calls, tyre complaints and swearing are
+# never sent anywhere.
+
+PROMPT_HEADER = """You are labelling Formula 1 team radio. Each line below is one message, \
+transcribed automatically from a compressed radio channel, so expect mangled words, missing \
+punctuation and mishearings.
+
+For each line, say which of these on-track events it describes, if any:
+
+{vocabulary}
+
+Rules:
+- Answer "none" unless the line clearly describes the event. Most radio is about strategy, \
+tyres, pace, weather or morale, and "none" is the correct answer for all of it.
+- Judge what the line says, not what the words resemble. "Head down" is encouragement, not \
+a completed overtake. "The car is snappy" is handling, not dirty air. "We will go past once" \
+in a sentence about pitting is strategy, not a pass.
+- A line about a pass between two OTHER cars is still that event.
+- If a single driver is named as the other car involved, give their name exactly as it \
+appears in the line. If nobody is named, or several are, leave it empty.
+- confidence is 0.0 to 1.0: how sure you are the line describes that event at all.
+
+Reply with one JSON object per line of input, in the same order, in a JSON array:
+[{{"n": 1, "event": "overtake_attempt", "other_car": "Russell", "confidence": 0.9, \
+"why": "driver says he is ready to get past a named car"}}]
+Use "none" for the event when nothing fits. No prose outside the JSON."""
+
+
+def vocabulary_block() -> str:
+    """The closed list the model must choose from, with the wording each type means.
+
+    Generated from the taxonomy rather than written out again: a prompt that drifts from
+    the types the database accepts produces labels that are silently discarded."""
+    return "\n".join(f"- {e.name}: {e.reads_as}" for e in EVENT_TYPES)
+
+
+def build_prompt(lines: list[str]) -> str:
+    """One request for a batch of lines. Numbered so the reply can be matched back by
+    position without trusting the model to echo the text unchanged."""
+    body = "\n".join(f"{i + 1}. {' '.join((t or '').split())}" for i, t in enumerate(lines))
+    return f"{PROMPT_HEADER.format(vocabulary=vocabulary_block())}\n\nLines:\n{body}"
+
+
+class Verdict(NamedTuple):
+    index: int          # 1-based, as sent
+    event_type: str     # a name from EVENT_TYPES
+    confidence: float
+    other_car: str | None
+    why: str | None
+
+
+def parse_verdicts(reply: str, batch_size: int, min_confidence: float) -> list[Verdict]:
+    """Read the model's reply, keeping only what is usable.
+
+    Everything here is a way of not trusting the reply: a label outside the vocabulary, an
+    index pointing past the batch, a confidence below the bar, or "none" all drop the row
+    rather than being coerced into something storable. A model that returns nothing usable
+    leaves the batch unlabelled, which is the same outcome as it saying "none" — no edge.
+    """
+    import json
+    import re
+
+    # Models wrap JSON in prose and fences however they like; take the outermost array.
+    match = re.search(r"\[.*\]", reply or "", re.S)
+    if not match:
+        return []
+    try:
+        rows = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+
+    out: list[Verdict] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("event") or "").strip()
+        if name not in BY_NAME:      # covers "none", empty, and anything invented
+            continue
+        try:
+            index = int(row.get("n"))
+            confidence = float(row.get("confidence", 0))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= index <= batch_size or confidence < min_confidence:
+            continue
+        other = str(row.get("other_car") or "").strip() or None
+        why = str(row.get("why") or "").strip() or None
+        out.append(Verdict(index, name, confidence, other, why[:200] if why else None))
+    return out
