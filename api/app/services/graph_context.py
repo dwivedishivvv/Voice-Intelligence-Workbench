@@ -11,6 +11,11 @@ the expansion is expensive to read and easy to misread; short natural-language l
 not. It is a pure function so it can be tested without either database.
 """
 from common import db, graph
+from common.ontrack import BY_NAME as _EVENT_TYPES
+
+# type -> the wording used when an event is shown. Read from the taxonomy so the phrasing
+# cannot drift from the definition it came from.
+ONTRACK_READS = {name: e.reads_as for name, e in _EVENT_TYPES.items()}
 
 # One round trip. Every relationship is OPTIONAL: a manually uploaded clip has no session
 # and no lap, an unenrolled voice has no speaker, and a partial neighbourhood is the
@@ -29,6 +34,8 @@ OPTIONAL MATCH (prev:Speech)-[:NEXT]->(sp)
 OPTIONAL MATCH (sp)-[:NEXT]->(nxt:Speech)
 OPTIONAL MATCH (sp)-[:DURING_LAP]->(lap:Lap)
 OPTIONAL MATCH (sp)-[:MENTIONS]->(ent)
+OPTIONAL MATCH (sp)-[reads:READS_AS]->(evt:EventType)
+OPTIONAL MATCH (sp)-[inv:INVOLVES]->(other:Driver)
 RETURN sid AS speech_id,
        sp.text AS text, sp.mood AS mood, sp.start_s AS start_s, sp.end_s AS end_s,
        sp.sentiment AS sentiment, sp.sentiment_score AS sentiment_score,
@@ -48,7 +55,13 @@ RETURN sid AS speech_id,
        collect(DISTINCT CASE WHEN ent IS NULL THEN null ELSE {
          kind: head(labels(ent)),
          name: coalesce(ent.code, ent.full_name, ent.name)
-       } END) AS mentions
+       } END) AS mentions,
+       collect(DISTINCT CASE WHEN evt IS NULL THEN null ELSE {
+         type: evt.name, family: evt.family, score: reads.score
+       } END) AS events,
+       collect(DISTINCT CASE WHEN other IS NULL THEN null ELSE {
+         driver: coalesce(other.code, other.full_name), event_type: inv.event_type
+       } END) AS event_targets
 """
 
 
@@ -187,6 +200,17 @@ def render_context(rows: list[dict], max_chars: int | None = None) -> str:
             lines.append(f'  "{r["text"].strip()}"')
         for lap in r.get("laps") or []:
             lines.append(f"  {_lap_phrase(lap)}")
+        # Hedged like tone, and for the same reason: a classifier read one sentence of
+        # ASR output. The score rides along so a reader can weigh it rather than take it.
+        for ev in r.get("events") or []:
+            if not ev.get("type"):
+                continue
+            target = next((t["driver"] for t in (r.get("event_targets") or [])
+                           if t.get("driver") and t.get("event_type") == ev["type"]), None)
+            reads = ONTRACK_READS.get(ev["type"], ev["type"].replace("_", " "))
+            lines.append(f"  on track: reads as {reads}"
+                         + (f", involving {target}" if target else "")
+                         + f" ({float(ev.get('score') or 0):.2f})")
         mentions = [m for m in (r.get("mentions") or []) if m.get("name")]
         if mentions:
             lines.append("  mentions: "

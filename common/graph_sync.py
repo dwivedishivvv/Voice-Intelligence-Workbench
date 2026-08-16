@@ -45,6 +45,7 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT call_id   IF NOT EXISTS FOR (c:RadioCall) REQUIRE c.call_id IS UNIQUE",
     "CREATE CONSTRAINT speech_id IF NOT EXISTS FOR (s:Speech)    REQUIRE s.speech_id IS UNIQUE",
     "CREATE CONSTRAINT team_nm   IF NOT EXISTS FOR (t:Team)      REQUIRE t.name IS UNIQUE",
+    "CREATE CONSTRAINT evt_nm    IF NOT EXISTS FOR (e:EventType) REQUIRE e.name IS UNIQUE",
     "CREATE CONSTRAINT circ_nm   IF NOT EXISTS FOR (c:Circuit)   REQUIRE c.name IS UNIQUE",
     "CREATE CONSTRAINT drv_key   IF NOT EXISTS FOR (d:Driver)    REQUIRE (d.session_key, d.number) IS UNIQUE",
     "CREATE CONSTRAINT lap_key   IF NOT EXISTS FOR (l:Lap)       REQUIRE (l.session_key, l.driver_number, l.number) IS UNIQUE",
@@ -97,6 +98,14 @@ NODE_PROJECTIONS = [
             u.start_s = row.start_s, u.end_s = row.end_s,
             u.sentiment = row.sentiment, u.sentiment_score = row.sentiment_score,
             u.text_sentiment = row.text_sentiment, u.mood = row.mood
+    """),
+    # A vocabulary node per event type. Small and closed, which is what makes
+    # (:EventType {name:"overtake_attempt"})<-[:READS_AS]-(:Speech) a one-hop query
+    # instead of a scan for a relationship property.
+    Projection("EventType", """
+        SELECT DISTINCT event_type AS name, family FROM speech_events""", """
+        UNWIND $rows AS row
+        MERGE (e:EventType {name: row.name}) SET e.family = row.family
     """),
     Projection("Session", """
         SELECT session_key, name, session_type, year, date_start, circuit, country
@@ -322,6 +331,32 @@ REL_PROJECTIONS = [
         UNWIND $rows AS row
         MATCH (x:Speaker {profile_id: row.a}), (y:Speaker {profile_id: row.b})
         MERGE (x)-[t:TALKED_WITH]->(y) SET t.n_clips = row.n_clips
+    """),
+    # READS_AS, not IS: the edge records how a line was read by a similarity classifier
+    # over one sentence of ASR output, and carries the score so a reader can discount it.
+    # Calling it anything stronger would let a model state an inference as a fact.
+    Projection("READS_AS", """
+        SELECT coalesce(e.utterance_id, e.radio_call_id)::text AS speech_id,
+               e.event_type, e.family, e.score, e.margin
+          FROM speech_events e""", """
+        UNWIND $rows AS row
+        MATCH (sp:Speech {speech_id: row.speech_id}), (t:EventType {name: row.event_type})
+        MERGE (sp)-[r:READS_AS]->(t)
+        SET r.score = row.score, r.margin = row.margin, r.family = row.family
+    """),
+    # The other car, when the line named exactly one. This is the movement-between-cars
+    # edge: it is what turns "who was anyone trying to pass" into a graph traversal.
+    Projection("INVOLVES", """
+        SELECT coalesce(e.utterance_id, e.radio_call_id)::text AS speech_id,
+               e.target_session_key AS session_key, e.target_driver_number AS number,
+               e.event_type, e.score
+          FROM speech_events e
+         WHERE e.target_driver_number IS NOT NULL AND e.target_session_key IS NOT NULL""", """
+        UNWIND $rows AS row
+        MATCH (sp:Speech {speech_id: row.speech_id}),
+              (d:Driver {session_key: row.session_key, number: row.number})
+        MERGE (sp)-[r:INVOLVES]->(d)
+        SET r.event_type = row.event_type, r.score = row.score
     """),
 ]
 

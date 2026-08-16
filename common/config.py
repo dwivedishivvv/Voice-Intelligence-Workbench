@@ -21,7 +21,8 @@ TUNABLE_FIELDS = {
     "verify_threshold", "cluster_threshold", "auto_enroll", "auto_enroll_min_sim",
     "auto_enroll_min_reliability", "retention_days", "asr_beam_size", "asr_language",
     "job_timeout_s", "job_max_attempts",
-    "graph_lap_match_tolerance_s",
+    "graph_lap_match_tolerance_s", "ontrack_min_similarity", "ontrack_min_margin",
+    "ontrack_min_words",
 }
 
 # The agent's own configuration: provider, model, key, and the switch that decides whether
@@ -74,7 +75,8 @@ SETTINGS_CATEGORIES = {
     "Transcription": ["asr_beam_size", "asr_language"],
     "Jobs & retention": ["job_timeout_s", "job_max_attempts", "retention_days"],
     # Unlike the rest, this one applies to the next *graph sync* rather than the next job.
-    "Graph": ["graph_lap_match_tolerance_s"],
+    "Graph": ["graph_lap_match_tolerance_s", "ontrack_min_similarity", "ontrack_min_margin",
+               "ontrack_min_words"],
 }
 
 
@@ -104,6 +106,27 @@ class Settings(BaseSettings):
     # nearer one by coin flip -- the same abstain-over-guess posture the identification
     # stage takes.
     graph_lap_match_tolerance_s: float = 2.0
+    # On-track events (common/ontrack.py). Cosine similarity against exemplar phrasings in
+    # the corpus's own embedding space, so these are on the same scale as the search
+    # scores and nothing like the speaker-identification ones — different model, different
+    # geometry. Tuned on this corpus by reading what each cutoff admits, not derived.
+    # Measured on this corpus, not guessed: at 0.42 a hand-read sample of 30 stored events
+    # was ~43% right — "Let's go, James!" as a completed overtake, "Stereo's locked" as a
+    # lock-up. Almost every error scored under 0.60 and most correct readings over it, so
+    # the default sits there: few events, mostly right. Lower it to trade precision for
+    # recall if a human is reading the results rather than a model asserting them.
+    ontrack_min_similarity: float = 0.60
+    # The gap the winning event type must have over the runner-up. Same reasoning as
+    # id_min_margin: "he's right behind me" reads as both defending and closing, and
+    # breaking that tie by the larger float invents a distinction the sentence lacks.
+    ontrack_min_margin: float = 0.05
+    # Shortest line worth classifying. A two-word fragment has almost no semantic content,
+    # so its nearest exemplar is noise wearing a score: "Head down." read as a completed
+    # overtake at 0.74, "Done, Ali." at 0.63, "Difficult, Oscar." at 0.66. Every one of
+    # those clears any floor worth having, because the floor measures similarity, not
+    # substance. Costs a few genuine short calls ("I went off.") — a trade worth making
+    # when the output becomes a graph edge a model will read as fact.
+    ontrack_min_words: int = 6
     # GRAPH_* rather than NEO4J_*: the neo4j container reads every NEO4J_-prefixed
     # variable in its environment as a server config setting and refuses to start on one
     # it doesn't recognise. Sharing that prefix with the client's own connection settings

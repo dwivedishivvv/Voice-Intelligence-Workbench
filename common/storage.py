@@ -39,11 +39,18 @@ def export_path(cfg, clip_id: str, name: str) -> str:
 
 
 def delete_clip_files(cfg, clip_id: str):
+    """Remove every artifact for a clip: the raw upload, the work directory, the exports.
+
+    The glob matches directories as well as files — `work/<clip_id>` is a directory, and
+    `raw/<clip_id>.wav` is a file — so each match has to be dispatched on its type.
+    Calling unlink() on a directory raises PermissionError (WinError 5) on Windows and
+    IsADirectoryError elsewhere, which took the whole delete down before the rmtree below
+    ever ran: deleting any processed clip returned a 500 and left its files behind."""
     import shutil
     for sub in ("raw", "work", "exports"):
         d = _base(cfg) / sub
         for f in d.glob(f"{clip_id}*"):
-            f.unlink(missing_ok=True)
-        cd = d / clip_id
-        if cd.is_dir():
-            shutil.rmtree(cd, ignore_errors=True)
+            if f.is_dir():
+                shutil.rmtree(f, ignore_errors=True)
+            else:
+                f.unlink(missing_ok=True)

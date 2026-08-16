@@ -10,7 +10,7 @@ from common.config import (get_settings, get_effective_settings, config_snapshot
                             Settings, TUNABLE_FIELDS, RESTART_TUNABLE_FIELDS,
                             SETTINGS_CATEGORIES, LLM_MODELS)
 from ..auth import get_current_user
-from ..services import agent as agent_svc
+from ..services import agent as agent_svc, ontrack_extract
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -211,6 +211,23 @@ async def rebuild_graph(user=Depends(get_current_user)):
         raise HTTPException(503, str(e)) from e
     await audit("graph.sync", "graph", "neo4j", after={"projected": sent, **got}, actor=user)
     return {"projected": sent, **got}
+
+
+@router.post("/ontrack/extract")
+async def extract_ontrack(force: bool = False, user=Depends(get_current_user)):
+    """Read on-track events out of the corpus (common/ontrack.py).
+
+    Separate from the graph sync on purpose: extraction reads Postgres and writes Postgres,
+    and runs whether or not Neo4j exists. Sync afterwards to project what it found.
+
+    force=false reads only speech that has never been looked at, which is the cheap
+    incremental case after an upload. force=true re-reads everything, which is what a
+    threshold change or a new event type requires.
+    """
+    embedded = await ontrack_extract.backfill_radio_embeddings()
+    result = await ontrack_extract.extract(force=force)
+    await audit("ontrack.extract", "corpus", "speech_events", actor=user, after=result)
+    return {**result, "radio_embedded": embedded}
 
 
 @router.get("/graph/summary")
