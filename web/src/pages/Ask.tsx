@@ -389,15 +389,17 @@ export default function Ask() {
   );
 
   return (
+    // Ask is a single 940 column — header rule, transcript and composer share one width
+    // and one centre line, so the input never drifts off to the side of a wide window.
     <div style={{
       height: "calc(100vh - 86px)", display: "flex", flexDirection: "column",
-      margin: "0 -34px -60px 0",
+      alignItems: "center", margin: "0 0 -60px",
     }}>
       {/* header, thread and composer all sit in the same 940 column, so the page reads as
           one column of rules rather than three of different widths on a wide screen */}
       <header style={{
         flex: "none", display: "flex", alignItems: "center", justifyContent: "space-between",
-        gap: 20, padding: "0 34px 12px 0", maxWidth: 940,
+        gap: 20, padding: "0 0 12px", width: "100%", maxWidth: 940,
         borderBottom: "1px solid var(--color-divider)",
       }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
@@ -432,8 +434,8 @@ export default function Ask() {
       </header>
 
       <div style={{
-        flex: 1, minHeight: 0, overflow: "auto", padding: "18px 34px 24px 0",
-        display: "flex", flexDirection: "column", gap: 20, maxWidth: 940,
+        flex: 1, minHeight: 0, overflow: "auto", padding: "18px 0 24px",
+        display: "flex", flexDirection: "column", gap: 20, width: "100%", maxWidth: 940,
       }}>
         {disabled && (
           <div style={{ border: `1px solid ${AMBER_INK}`, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
@@ -582,9 +584,9 @@ export default function Ask() {
           instead of sitting alone at the foot of a blank page. */}
       {!empty && (
         <div style={{
-          flex: "none", padding: "14px 34px 18px 0", borderTop: "1px solid var(--color-divider)",
+          flex: "none", padding: "14px 0 18px", borderTop: "1px solid var(--color-divider)",
           background: "var(--color-bg)", display: "flex", flexDirection: "column",
-          gap: 9, maxWidth: 940,
+          gap: 9, width: "100%", maxWidth: 940,
         }}>
           {composer}
         </div>

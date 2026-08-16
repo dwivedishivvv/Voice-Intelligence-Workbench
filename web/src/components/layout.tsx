@@ -147,7 +147,11 @@ export default function Layout({ children }: { children: ReactNode }) {
           </div>
         </aside>
 
-        <main style={{ flex: 1, minWidth: 0, padding: "26px 34px 60px", maxWidth: 1240 }}>
+        {/* The column caps at 1240 — the width the design was drawn for. Past that the
+            leftover space is split either side instead of all piling up on the right. */}
+        <main style={{
+          flex: 1, minWidth: 0, padding: "26px 34px 60px", maxWidth: 1240, marginInline: "auto",
+        }}>
           {children}
         </main>
 
