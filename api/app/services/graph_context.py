@@ -10,7 +10,7 @@ capability.
 the expansion is expensive to read and easy to misread; short natural-language lines are
 not. It is a pure function so it can be tested without either database.
 """
-from common import graph
+from common import db, graph
 
 # One round trip. Every relationship is OPTIONAL: a manually uploaded clip has no session
 # and no lap, an unenrolled voice has no speaker, and a partial neighbourhood is the
@@ -60,6 +60,69 @@ async def expand(speech_ids: list[str]) -> list[dict]:
     by_id = {r["speech_id"]: r for r in rows}
     # Preserve the ranking the anchor step produced; Cypher makes no ordering promise.
     return [by_id[sid] for sid in speech_ids if sid in by_id]
+
+
+# The same fields EXPAND_CYPHER returns, from the tables the graph is projected *from*.
+# Speaker resolution mirrors the utterances view: clip_speakers is the authoritative
+# identity row and utterances.profile_id can lag it, so either may carry the name.
+RESOLVE_UTTERANCES_SQL = """
+SELECT u.id::text AS speech_id, u.text, u.mood, u.start_s, u.end_s,
+       u.sentiment, u.sentiment_score, u.text_sentiment,
+       p.display_name AS speaker, u.clip_id::text AS clip_id, c.filename
+  FROM utterances u
+  JOIN clips c ON c.id = u.clip_id
+  LEFT JOIN clip_speakers cs ON cs.clip_id = u.clip_id AND cs.local_label = u.local_label
+  LEFT JOIN speaker_profiles p ON p.id = coalesce(u.profile_id, cs.profile_id)
+ WHERE u.id = ANY($1::uuid[])
+"""
+
+RESOLVE_RADIO_SQL = """
+SELECT rc.id::text AS speech_id, rc.text, rc.mood, rc.clip_id::text AS clip_id,
+       d.name_acronym AS driver, d.full_name AS driver_name, d.team_name AS team,
+       s.name AS session, s.year, s.circuit
+  FROM radio_calls rc
+  LEFT JOIN f1_drivers d
+         ON d.driver_number = rc.driver_number AND d.session_key = rc.session_key
+  LEFT JOIN f1_sessions s ON s.session_key = rc.session_key
+ WHERE rc.id = ANY($1::uuid[])
+"""
+
+
+async def resolve(speech_ids: list[str]) -> list[dict]:
+    """Everything known about each id, graph first, Postgres for the rest.
+
+    The graph is a *derived* read model, rebuilt by an explicit sync — so it is routinely
+    behind the corpus, and any id processed since the last sync expands to nothing. That
+    is tolerable for the lap and entity edges, which only the graph has. It is not
+    tolerable for the quote, the speaker and the clip offset: those are what turn a cited
+    id into a link the reader can check, and resolving them only through the graph meant a
+    stale projection silently produced an answer whose citations went nowhere.
+
+    Graph rows win where they exist, because they carry the edges Postgres cannot.
+    """
+    if not speech_ids:
+        return []
+    found: dict[str, dict] = {}
+    try:
+        found = {r["speech_id"]: r for r in await expand(speech_ids)}
+    except Exception:
+        # Graph off or unreachable: a deployment state, not a failure of the request.
+        pass
+
+    missing = [sid for sid in speech_ids if sid not in found]
+    if missing:
+        for sql in (RESOLVE_UTTERANCES_SQL, RESOLVE_RADIO_SQL):
+            if not missing:
+                break
+            try:
+                rows = await db.fetch(sql, missing)
+            except Exception:
+                continue
+            for r in rows:
+                found[r["speech_id"]] = {**dict(r), "laps": [], "mentions": []}
+            missing = [sid for sid in missing if sid not in found]
+
+    return [found[sid] for sid in speech_ids if sid in found]
 
 
 def _tone_phrase(row: dict) -> str:

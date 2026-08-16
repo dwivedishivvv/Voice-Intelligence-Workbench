@@ -242,11 +242,12 @@ async def expand_speech(speech_id: str) -> str:
     if not ids:
         return (f"No speech id found in {speech_id!r}. Ids are UUIDs from search_speech, "
                 f"in square brackets at the start of each result.")
-    rows = await graph_context.expand(ids[:10])
+    # resolve(), not expand(): a stale graph would otherwise answer "no such speech" for an
+    # id search_speech had just returned, which the model reports as a gap in the corpus.
+    rows = await graph_context.resolve(ids[:10])
     if not rows:
         return (f"No speech with {'id' if len(ids) == 1 else 'those ids'} {', '.join(ids[:10])}. "
-                f"Ids come from search_speech; the graph may also be out of date if it has "
-                f"not been re-synced.")
+                f"Ids come from search_speech.")
     # Say which ids came back empty rather than silently returning fewer than asked for —
     # a model comparing counts would otherwise read the gap as absence of evidence.
     missing = [i for i in ids[:10] if i not in {r["speech_id"] for r in rows}]
@@ -464,7 +465,17 @@ part is missing instead of filling the gap.
 
 Keep responses brief and specific. Lead with the answer, then the evidence. Do not restate \
 the question, do not narrate which tools you are about to call, and do not pad with caveats \
-beyond the ones above."""
+beyond the ones above.
+
+Do not re-quote the evidence. Every id you cite is rendered beside your answer with its \
+full quote, speaker and a link to the audio, so repeating those lines in prose adds nothing \
+and makes the reader wait for it. Characterise what was said in your own words and attach \
+the ids: "three calls read stressed, all about tyre wear [id] [id] [id]" — not a bulleted \
+list of the quotes themselves. Two or three sentences answers most questions.
+
+Brevity never costs citations. A bare count or a summary with no ids attached is not an \
+answer — it is the one thing the reader cannot check. Every id behind what you are \
+describing goes in the text, however short the text is."""
 
 
 async def _roster() -> str:

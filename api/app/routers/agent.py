@@ -57,7 +57,11 @@ async def ask(body: AskBody, user=Depends(get_current_user)):
     citations = []
     if shown:
         try:
-            citations = await graph_context.expand(shown)
+            # resolve(), not expand(): the graph is rebuilt by an explicit sync and is
+            # routinely behind the corpus, so anything processed since the last one
+            # expands to nothing. Falling back to Postgres for the quote, speaker and clip
+            # offset is what keeps a cited id clickable on a stale projection.
+            citations = await graph_context.resolve(shown)
         except Exception:
             citations = []
 

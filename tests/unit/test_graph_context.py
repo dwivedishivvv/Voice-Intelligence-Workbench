@@ -11,6 +11,8 @@ asserted here are mostly about honesty rather than formatting:
 
 Pure function, so none of this needs Postgres or Neo4j.
 """
+import asyncio
+
 import pytest
 
 from api.app.services.graph_context import render_context
@@ -143,3 +145,72 @@ def test_truncation_keeps_the_highest_ranked_blocks_first():
     full_len = len(render_context([FULL]))
     out = render_context([FULL, BARE], max_chars=full_len + 2)
     assert "[abc-123]" in out and "[bare-1]" not in out
+
+
+# --- resolving citations without the graph -----------------------------------
+#
+# The graph is a derived read model rebuilt by an explicit sync, so it is routinely behind
+# the corpus. Resolving a cited id only through it meant an answer whose citations went
+# nowhere: the UI renders one card per resolved id, so an empty resolution is a chip with
+# nothing to click. Measured at 1 of 8 ids on a live corpus before this existed.
+
+def test_resolve_falls_back_to_postgres_for_ids_the_graph_has_not_seen(monkeypatch):
+    from api.app.services import graph_context as gc
+
+    async def fake_graph_run(*a, **kw):
+        return [{"speech_id": "in-graph", "text": "from neo4j", "laps": [{"number": 3}]}]
+
+    async def fake_fetch(sql, ids):
+        if "utterances" in sql:
+            return [{"speech_id": "in-pg", "text": "from postgres", "clip_id": "c1",
+                     "start_s": 4.2, "mood": "stressed"}]
+        return []
+
+    monkeypatch.setattr(gc.graph, "run", fake_graph_run)
+    monkeypatch.setattr(gc.db, "fetch", fake_fetch)
+
+    rows = asyncio.run(gc.resolve(["in-graph", "in-pg"]))
+    assert [r["speech_id"] for r in rows] == ["in-graph", "in-pg"], "anchor order not preserved"
+    # The graph row keeps the edges only it has; the Postgres row carries what the UI needs
+    # to make the citation clickable.
+    assert rows[0]["laps"] == [{"number": 3}]
+    assert rows[1]["clip_id"] == "c1" and rows[1]["start_s"] == 4.2
+    assert rows[1]["laps"] == [] and rows[1]["mentions"] == []
+
+
+def test_resolve_works_with_the_graph_switched_off(monkeypatch):
+    """GRAPH_ENABLED defaults to false. Citations are not an optional feature."""
+    from api.app.services import graph_context as gc
+    from common.graph import GraphUnavailable
+
+    async def fake_graph_run(*a, **kw):
+        raise GraphUnavailable("graph disabled")
+
+    async def fake_fetch(sql, ids):
+        return ([{"speech_id": "u1", "text": "hi", "clip_id": "c1", "start_s": 1.0}]
+                if "utterances" in sql else [])
+
+    monkeypatch.setattr(gc.graph, "run", fake_graph_run)
+    monkeypatch.setattr(gc.db, "fetch", fake_fetch)
+
+    rows = asyncio.run(gc.resolve(["u1"]))
+    assert rows and rows[0]["clip_id"] == "c1"
+
+
+def test_resolve_reads_radio_calls_as_well_as_utterances(monkeypatch):
+    """Radio calls are most of the F1 corpus and never reach the utterances table unless
+    they go through the full pipeline."""
+    from api.app.services import graph_context as gc
+
+    async def fake_graph_run(*a, **kw):
+        return []
+
+    async def fake_fetch(sql, ids):
+        return ([] if "utterances" in sql
+                else [{"speech_id": "r1", "text": "box box", "driver": "NOR"}])
+
+    monkeypatch.setattr(gc.graph, "run", fake_graph_run)
+    monkeypatch.setattr(gc.db, "fetch", fake_fetch)
+
+    rows = asyncio.run(gc.resolve(["r1"]))
+    assert rows and rows[0]["driver"] == "NOR"
