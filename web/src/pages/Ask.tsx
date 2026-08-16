@@ -355,15 +355,50 @@ export default function Ask() {
   );
 
   const lastTurn = active?.turns[active.turns.length - 1];
+  const empty = !active && !busy;
+
+  const composer = (
+    <>
+      <div className="blueprint" style={{ padding: "10px 12px", display: "flex", alignItems: "flex-end", gap: 10 }}>
+        <textarea
+          className="input"
+          rows={2}
+          value={question}
+          disabled={busy}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(question); }
+          }}
+          placeholder={empty
+            ? "Ask anything about the recordings. Answers cite the clips they came from."
+            : "Ask a follow-up. Answers cite clips; nothing is asserted without a citation."}
+          style={{
+            flex: 1, resize: "none", border: "none", background: "transparent",
+            padding: "2px 0", fontSize: 15, lineHeight: 1.5, minHeight: 0,
+          }}
+        />
+        <button className="btn btn-primary" style={{ flex: "none" }}
+                disabled={busy || !question.trim()} onClick={() => ask(question)}>
+          {busy ? "Asking…" : "Ask"}
+        </button>
+      </div>
+      <span className="mono" style={{ fontSize: 11, color: muted(45) }}>
+        retrieval local · answer generation off-box
+      </span>
+    </>
+  );
 
   return (
     <div style={{
       height: "calc(100vh - 86px)", display: "flex", flexDirection: "column",
       margin: "0 -34px -60px 0",
     }}>
+      {/* header, thread and composer all sit in the same 940 column, so the page reads as
+          one column of rules rather than three of different widths on a wide screen */}
       <header style={{
         flex: "none", display: "flex", alignItems: "center", justifyContent: "space-between",
-        gap: 20, padding: "0 34px 12px 0", borderBottom: "1px solid var(--color-divider)",
+        gap: 20, padding: "0 34px 12px 0", maxWidth: 940,
+        borderBottom: "1px solid var(--color-divider)",
       }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
           <h3 style={{
@@ -376,21 +411,24 @@ export default function Ask() {
             {lastTurn ? ` · ${lastTurn.provider}/${lastTurn.model}` : ""}
           </span>
         </div>
-        <div style={{ display: "flex", gap: 6, flex: "none" }}>
-          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
-                  disabled={!active}
-                  onClick={() => { setRenameDraft(active?.title || ""); setRenaming(true); }}>
-            Rename
-          </button>
-          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
-                  disabled={!active} onClick={exportThread}>
-            Export thread
-          </button>
-          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px", color: RED }}
-                  disabled={!active} onClick={() => active && setDeleting(active)}>
-            Delete
-          </button>
-        </div>
+        {/* Nothing to rename, export or delete until a thread exists — three greyed-out
+            buttons are just furniture on an empty screen. */}
+        {active && (
+          <div style={{ display: "flex", gap: 6, flex: "none" }}>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
+                    onClick={() => { setRenameDraft(active.title); setRenaming(true); }}>
+              Rename
+            </button>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
+                    onClick={exportThread}>
+              Export thread
+            </button>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px", color: RED }}
+                    onClick={() => setDeleting(active)}>
+              Delete
+            </button>
+          </div>
+        )}
       </header>
 
       <div style={{
@@ -409,19 +447,29 @@ export default function Ask() {
           </div>
         )}
 
-        {!active && !busy && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: "62ch" }}>
-            <p style={{ margin: 0, fontSize: 15, lineHeight: 1.6, color: muted(72) }}>
-              Question the corpus. Retrieval runs on the box; only the final wording is composed
-              off-box, and every claim comes back with the clip it came from.
-            </p>
-            {EXAMPLES.map((ex) => (
-              <button key={ex} className="btn btn-secondary"
-                      style={{ justifyContent: "space-between", fontSize: 13, textAlign: "left" }}
-                      onClick={() => ask(ex)}>
-                {ex} <span style={{ opacity: 0.5 }}>↵</span>
-              </button>
-            ))}
+        {/* Nothing to scroll on an empty thread, so the invitation and the composer sit
+            together in the middle of the space rather than at opposite ends of it. */}
+        {empty && (
+          <div style={{
+            flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: 14,
+          }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span className="kicker">Ask the corpus</span>
+              <p style={{ margin: 0, fontSize: 16, lineHeight: 1.6, color: muted(72), maxWidth: "58ch" }}>
+                Retrieval runs on the box; only the final wording is composed off-box, and every
+                claim comes back with the clip it came from.
+              </p>
+            </div>
+            {composer}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 4 }}>
+              {EXAMPLES.map((ex) => (
+                <button key={ex} className="btn btn-secondary"
+                        style={{ justifyContent: "space-between", fontSize: 13, textAlign: "left" }}
+                        onClick={() => ask(ex)}>
+                  {ex} <span style={{ opacity: 0.5 }}>↵</span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -529,35 +577,18 @@ export default function Ask() {
         <div ref={bottomRef} />
       </div>
 
-      <div style={{
-        flex: "none", padding: "14px 34px 18px 0", borderTop: "1px solid var(--color-divider)",
-        background: "var(--color-bg)", display: "flex", flexDirection: "column", gap: 9, maxWidth: 940,
-      }}>
-        <div className="blueprint" style={{ padding: "10px 12px", display: "flex", alignItems: "flex-end", gap: 10 }}>
-          <textarea
-            className="input"
-            rows={2}
-            value={question}
-            disabled={busy}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(question); }
-            }}
-            placeholder="Ask a follow-up. Answers cite clips; nothing is asserted without a citation."
-            style={{
-              flex: 1, resize: "none", border: "none", background: "transparent",
-              padding: "2px 0", fontSize: 15, lineHeight: 1.5, minHeight: 0,
-            }}
-          />
-          <button className="btn btn-primary" style={{ flex: "none" }}
-                  disabled={busy || !question.trim()} onClick={() => ask(question)}>
-            {busy ? "Asking…" : "Ask"}
-          </button>
+      {/* With a thread open the composer is pinned under the scrolling transcript. On an
+          empty screen there is nothing to scroll, so it travels up with the invitation
+          instead of sitting alone at the foot of a blank page. */}
+      {!empty && (
+        <div style={{
+          flex: "none", padding: "14px 34px 18px 0", borderTop: "1px solid var(--color-divider)",
+          background: "var(--color-bg)", display: "flex", flexDirection: "column",
+          gap: 9, maxWidth: 940,
+        }}>
+          {composer}
         </div>
-        <span className="mono" style={{ fontSize: 11, color: muted(45) }}>
-          retrieval local · answer generation off-box
-        </span>
-      </div>
+      )}
 
       <Dialog
         open={renaming}
