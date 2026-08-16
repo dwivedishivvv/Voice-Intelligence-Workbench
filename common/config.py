@@ -24,6 +24,32 @@ TUNABLE_FIELDS = {
     "graph_lap_match_tolerance_s",
 }
 
+# The agent's own configuration: provider, model, key, and the switch that decides whether
+# anything leaves the box at all. Deliberately NOT in TUNABLE_FIELDS — the generic settings
+# PATCH refuses every one of these, so they cannot be changed by a caller sweeping the
+# settings surface. They have their own endpoint, their own section in the UI, and in the
+# case of the keys a write-only contract: a key can be set and replaced, never read back.
+#
+# This is a weaker posture than .env-only, and the trade is explicit: the operator gets to
+# configure the agent without a redeploy, and in exchange anyone holding the app's API key
+# can point it at a provider of their choosing. The keys sit in settings_overrides in
+# plaintext, like every other override, so the database is now a secret store.
+AGENT_TUNABLE_FIELDS = {"llm_enabled", "llm_provider", "llm_model"}
+AGENT_SECRET_FIELDS = {"anthropic_api_key", "nvidia_api_key", "groq_api_key"}
+
+# Offered in the UI as a toggle per provider. Not a validation list — llm_model accepts any
+# string, because a local vLLM serves whatever it was started with — just the shortlist that
+# saves the operator from typing a model id from memory.
+LLM_MODELS = {
+    "anthropic": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    # Groq serves these at hundreds of tokens a second, which is the difference between a
+    # readable answer and a minute of staring at a spinner.
+    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-120b"],
+    "nvidia": ["meta/llama-3.1-70b-instruct", "meta/llama-3.1-8b-instruct",
+               "meta/llama-3.3-70b-instruct"],
+}
+
+
 # Editable from the Settings page too, but unlike TUNABLE_FIELDS these are read once when
 # ModelPool is built, so an edit is stored as pending and only bites on the next worker
 # start. Kept separate so the "applies to the next job" promise TUNABLE_FIELDS makes stays
@@ -92,14 +118,16 @@ class Settings(BaseSettings):
     # before; with it true, transcript excerpts are sent to the Anthropic API as tool
     # results. That is a deployment decision, not a threshold to tweak from a web page.
     llm_enabled: bool = False
-    # anthropic | nvidia. "nvidia" is the OpenAI-compatible path: it also serves any other
-    # OpenAI-shaped endpoint (a local vLLM or Ollama server) by pointing NVIDIA_BASE_URL
-    # elsewhere, which is what makes keeping two providers worth it rather than one plus
-    # a speculative abstraction.
+    # anthropic | nvidia | groq. The latter two are the OpenAI-compatible path, which also
+    # serves any other OpenAI-shaped endpoint (a local vLLM or Ollama server) by pointing
+    # that provider's base URL elsewhere — what makes keeping the seam worth it rather than
+    # one provider plus a speculative abstraction.
     llm_provider: str = "anthropic"
     anthropic_api_key: str = ""
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     # Empty means "the default for the selected provider" (see agent.DEFAULT_MODELS), so
     # switching provider does not silently keep pointing at the other one's model id.
     llm_model: str = ""
@@ -207,8 +235,14 @@ def get_settings() -> Settings:
 
 
 def config_snapshot(s: Settings) -> dict:
+    """Settings with every secret removed.
+
+    Served by GET /v1/admin/config and stored on every processing run, so anything left in
+    here is both readable over the API and durable in the database. The provider keys were
+    not on this list until they could be set from the UI; they are secrets wherever they
+    came from, and a snapshot is for reproducing a run, which never needs one."""
     d = s.model_dump()
-    for k in ("postgres_password", "api_key"):
+    for k in {"postgres_password", "api_key", "graph_password"} | AGENT_SECRET_FIELDS:
         d.pop(k, None)
     return d
 

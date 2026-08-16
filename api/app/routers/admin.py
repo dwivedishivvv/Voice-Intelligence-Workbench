@@ -8,8 +8,9 @@ from common.audit import audit
 from common.graph import GraphUnavailable
 from common.config import (get_settings, get_effective_settings, config_snapshot,
                             Settings, TUNABLE_FIELDS, RESTART_TUNABLE_FIELDS,
-                            SETTINGS_CATEGORIES)
+                            SETTINGS_CATEGORIES, LLM_MODELS)
 from ..auth import get_current_user
+from ..services import agent as agent_svc
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -88,6 +89,85 @@ async def patch_settings(body: SettingsPatch, user=Depends(get_current_user)):
 async def reset_setting(setting_key: str, user=Depends(get_current_user)):
     await db.execute("DELETE FROM settings_overrides WHERE key=$1", setting_key)
     return {"ok": True}
+
+
+def _key_hint(key: str) -> str:
+    """Enough to tell one key from another, not enough to use. Four characters of a 40+
+    character secret identifies which key is installed without handing it back."""
+    return f"…{key[-4:]}" if len(key) > 8 else ("set" if key else "")
+
+
+@router.get("/llm")
+async def get_llm_config(user=Depends(get_current_user)):
+    """The agent's configuration, with the keys deliberately absent.
+
+    A GET that returned the key would put it in the browser's memory, its devtools, and
+    anything that ever logs a response body — for a value the UI only needs to *replace*,
+    never to read. So each provider reports whether a key is installed and the last four
+    characters, which is what an operator needs to tell "already configured" from "empty"
+    and one key from another.
+    """
+    cfg = await get_effective_settings()
+    return {
+        "enabled": cfg.llm_enabled,
+        "provider": cfg.llm_provider,
+        "model": cfg.llm_model,
+        "providers": [
+            {"name": name,
+             "models": models,
+             "default_model": agent_svc.DEFAULT_MODELS.get(name, ""),
+             "key_set": bool(getattr(cfg, f"{name}_api_key", "")),
+             "key_hint": _key_hint(getattr(cfg, f"{name}_api_key", "")),
+             "base_url": getattr(cfg, f"{name}_base_url", None)}
+            for name, models in LLM_MODELS.items()
+        ],
+    }
+
+
+class LLMPatch(BaseModel):
+    enabled: bool | None = None
+    provider: str | None = None
+    model: str | None = None
+    # Which provider the key belongs to, and the key. Sent only when it changes; the UI
+    # never holds the existing one, so an empty string here means "clear it" rather than
+    # "unchanged" — the caller has to be explicit either way.
+    api_key_provider: str | None = None
+    api_key: str | None = None
+
+
+@router.patch("/llm")
+async def patch_llm_config(body: LLMPatch, user=Depends(get_current_user)):
+    """Configure the agent. The only write path for these fields — the generic settings
+    PATCH refuses all of them, so turning the agent on or repointing it at another vendor
+    cannot happen as a side effect of a caller sweeping the settings surface."""
+    values: dict[str, bool | str] = {}
+    if body.enabled is not None:
+        values["llm_enabled"] = body.enabled
+    if body.provider is not None:
+        if body.provider not in LLM_MODELS:
+            raise HTTPException(400, f"unknown provider {body.provider!r}; "
+                                     f"expected one of {', '.join(sorted(LLM_MODELS))}")
+        values["llm_provider"] = body.provider
+    if body.model is not None:
+        values["llm_model"] = body.model
+    if body.api_key is not None:
+        if body.api_key_provider not in LLM_MODELS:
+            raise HTTPException(400, "api_key needs api_key_provider naming which provider "
+                                     "it belongs to")
+        values[f"{body.api_key_provider}_api_key"] = body.api_key
+
+    for key, value in values.items():
+        await db.execute(
+            """INSERT INTO settings_overrides (key, value, updated_at, updated_by)
+               VALUES ($1, $2, now(), $3)
+               ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=now(), updated_by=$3""",
+            key, str(value), user)
+
+    # Names only. The audit log is append-only and readable through the API, so writing the
+    # key here would durably publish the secret this endpoint exists to keep out of reads.
+    await audit("agent.configure", "settings", "llm", actor=user,
+                after={"changed": sorted(values)})
+    return await get_llm_config(user)
 
 
 @router.post("/calibrate")

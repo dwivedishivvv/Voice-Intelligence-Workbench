@@ -36,12 +36,43 @@ def test_default_provider_does_not_assume_a_third_party():
     assert Settings.model_fields["llm_model"].default == ""
 
 
-def test_agent_cannot_be_switched_on_from_the_settings_page():
-    """Everything in TUNABLE_FIELDS is editable live from a web page by anyone holding the
-    API key. Sending transcripts to a third party is a deployment decision, not a
-    threshold — it belongs in .env, where turning it on is deliberate and reviewable."""
-    assert "llm_enabled" not in TUNABLE_FIELDS
-    assert "anthropic_api_key" not in TUNABLE_FIELDS
+def test_agent_config_is_not_part_of_the_generic_settings_surface():
+    """The agent is now configurable from the UI — deliberately, and through its own
+    endpoint, not by widening TUNABLE_FIELDS.
+
+    That distinction is the whole protection. Everything in TUNABLE_FIELDS is writable by
+    a caller PATCHing the settings surface; keeping the provider, the key and the off-box
+    switch out of it means enabling the agent or repointing it at another vendor cannot
+    happen as a side effect of a sweep over the thresholds. It takes a request that names
+    what it is doing."""
+    from common.config import (AGENT_SECRET_FIELDS, AGENT_TUNABLE_FIELDS,
+                                RESTART_TUNABLE_FIELDS)
+    editable = TUNABLE_FIELDS | RESTART_TUNABLE_FIELDS
+    assert not (AGENT_TUNABLE_FIELDS & editable)
+    assert not (AGENT_SECRET_FIELDS & editable)
+
+
+def test_no_provider_key_survives_a_config_snapshot():
+    """config_snapshot is served by GET /v1/admin/config and stored on every processing
+    run, so it is both readable over the API and durable in the database. A key set from
+    the Settings page must not leak through the door the pipeline uses for reproducibility.
+    """
+    from common.config import AGENT_SECRET_FIELDS, Settings, config_snapshot
+    filled = Settings(**{f: "sk-secret-value" for f in AGENT_SECRET_FIELDS})
+    snap = config_snapshot(filled)
+    assert not (AGENT_SECRET_FIELDS & set(snap))
+    assert "sk-secret-value" not in str(snap)
+
+
+def test_secrets_are_never_returned_by_the_agent_config_endpoint():
+    """The UI needs to know whether a key is installed and which one, never the key. A hint
+    is four characters of a 40-character secret: enough to tell two keys apart, useless to
+    anyone who intercepts it."""
+    from api.app.routers.admin import _key_hint
+    assert _key_hint("sk-abcdefghijklmnop1234") == "…1234"
+    assert _key_hint("") == ""
+    # A short value is reported as present rather than mostly revealed.
+    assert _key_hint("sk-12") == "set"
 
 
 def test_disabled_agent_raises_rather_than_calling_out():
@@ -76,9 +107,27 @@ def test_unknown_provider_is_rejected_before_any_call_goes_out():
 def test_each_provider_has_its_own_default_model():
     """llm_model defaults to empty and is resolved per provider, so switching provider
     cannot leave the request pointing at the other vendor's model id."""
-    assert set(agent.DEFAULT_MODELS) == {"anthropic", "nvidia"}
+    from common.config import LLM_MODELS
+    assert set(agent.DEFAULT_MODELS) == {"anthropic", "nvidia", "groq"}
     assert agent.DEFAULT_MODELS["anthropic"].startswith("claude")
     assert "/" in agent.DEFAULT_MODELS["nvidia"]
+    # Every provider the UI offers must be one the runner can actually route, and its
+    # default must be among the models offered for it — a default absent from the toggle
+    # list renders as no selection at all.
+    assert set(LLM_MODELS) == set(agent.DEFAULT_MODELS)
+    for provider, models in LLM_MODELS.items():
+        assert agent.DEFAULT_MODELS[provider] in models, provider
+
+
+def test_every_provider_reads_its_own_key_and_base_url():
+    """The runner resolves both by name, so a provider added to LLM_MODELS without the
+    matching Settings fields would fail at request time with an AttributeError rather than
+    a readable "no API key" message."""
+    from common.config import LLM_MODELS, Settings
+    for provider in LLM_MODELS:
+        assert f"{provider}_api_key" in Settings.model_fields, provider
+        if provider != "anthropic":  # the OpenAI-shaped path is the one that needs a URL
+            assert f"{provider}_base_url" in Settings.model_fields, provider
 
 
 def test_openai_schema_is_derived_from_the_same_tool_declarations():

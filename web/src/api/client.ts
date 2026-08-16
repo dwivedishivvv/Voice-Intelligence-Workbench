@@ -78,6 +78,18 @@ export const api = {
   // Measures thresholds against your own enrollments and returns suggestions. It writes a
   // calibration_runs row, never a setting — applying is a separate, explicit PATCH.
   calibrate: () => req("/v1/admin/calibrate", { method: "POST" }),
+  // The agent's own config. Keys are write-only: the GET reports whether one is installed
+  // and its last four characters, never the key itself.
+  getLLM: () => req("/v1/admin/llm"),
+  patchLLM: (body: {
+    enabled?: boolean; provider?: string; model?: string;
+    api_key_provider?: string; api_key?: string;
+  }) =>
+    req("/v1/admin/llm", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   listModels: () => req("/v1/admin/models"),
   pullModel: (category: string, repo_id: string) =>
     req("/v1/admin/models/pull", {

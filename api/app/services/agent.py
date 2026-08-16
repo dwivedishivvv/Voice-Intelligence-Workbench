@@ -346,6 +346,10 @@ BY_NAME = {t.to_dict()["name"]: t for t in TOOLS}
 
 DEFAULT_MODELS = {
     "anthropic": "claude-opus-5",
+    # Same OpenAI-shaped loop as nvidia, different host and an order of magnitude more
+    # tokens per second — the reason the provider is worth having rather than a base-URL
+    # override on the nvidia one.
+    "groq": "llama-3.3-70b-versatile",
     # Verified to emit well-formed tool_calls against this corpus; meta/llama-3.1-70b-instruct
     # also works if this one is unavailable.
     # Non-reasoning on purpose. The nemotron-super reasoning models on this endpoint
@@ -556,10 +560,11 @@ async def answer(question: str, history: list[dict] | None = None, cfg=None,
     # roster out of the database, and doing that ahead of the gate means an unconfigured or
     # disabled agent still pulls corpus data into memory on its way to failing -- the exact
     # ordering the "check the gate before you build a request" rule exists to prevent.
-    key = cfg.anthropic_api_key if provider == "anthropic" else cfg.nvidia_api_key
+    key = getattr(cfg, f"{provider}_api_key", "")
     if not key:
         raise LLMUnavailable(
-            f"{'ANTHROPIC_API_KEY' if provider == 'anthropic' else 'NVIDIA_API_KEY'} is not set")
+            f"no API key for {provider} — set one in Settings › Ask AI, "
+            f"or {provider.upper()}_API_KEY in .env")
 
     system = (await build_system(cfg))[0]["text"]
     messages = list(history or []) + [{"role": "user", "content": question}]
@@ -567,7 +572,7 @@ async def answer(question: str, history: list[dict] | None = None, cfg=None,
     if provider == "anthropic":
         result = await _run_anthropic(cfg, model, system, messages, emit)
     else:
-        result = await _run_openai_compatible(cfg, model, system, messages, emit)
+        result = await _run_openai_compatible(cfg, model, system, messages, emit, provider)
 
     result["model"] = model
     result["provider"] = provider
@@ -638,8 +643,8 @@ async def _run_anthropic(cfg, model, system, messages, emit) -> dict:
     return _finish(text, tools_used, usage)
 
 
-async def _run_openai_compatible(cfg, model, system, messages, emit) -> dict:
-    """Hand-written tool loop for OpenAI-shaped endpoints (NVIDIA NIM, vLLM, Ollama).
+async def _run_openai_compatible(cfg, model, system, messages, emit, provider="nvidia") -> dict:
+    """Hand-written tool loop for OpenAI-shaped endpoints (Groq, NVIDIA NIM, vLLM, Ollama).
 
     No tool-runner helper exists on this path, so the loop is explicit: call, execute any
     tool_calls, append the results, repeat until the model answers without calling a tool.
@@ -648,7 +653,8 @@ async def _run_openai_compatible(cfg, model, system, messages, emit) -> dict:
     """
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=cfg.nvidia_api_key, base_url=cfg.nvidia_base_url)
+    client = AsyncOpenAI(api_key=getattr(cfg, f"{provider}_api_key"),
+                         base_url=getattr(cfg, f"{provider}_base_url"))
     msgs = [{"role": "system", "content": system}] + messages
     tools, tools_used, sources = _openai_tools(), [], []
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}

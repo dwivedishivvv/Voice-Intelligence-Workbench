@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { api } from "@/api/client";
 import { Dialog } from "@/components/dialog";
 import { ModelsPanel } from "@/components/models-panel";
+import { AskAIPanel } from "@/components/ask-ai-panel";
 import { AMBER_INK, muted, num, tagTone } from "@/lib/ui";
 
 type Field = {
@@ -123,6 +124,10 @@ export default function Settings() {
       name: c.name,
       badge: c.fields.filter((f) => f.overridden).length || "",
     })),
+    // Ask AI is not one of the pipeline categories: it is the only page that decides
+    // whether anything leaves the box, so it gets its own tab rather than a row among the
+    // thresholds, and its own endpoint behind it.
+    { name: "Ask AI", badge: "" as string | number },
     { name: "Models", badge: "" as string | number },
     { name: "System", badge: pendingCount ? `${pendingCount} pending` : "" },
   ];
@@ -197,6 +202,8 @@ export default function Settings() {
           ))}
         </section>
       )}
+
+      {tab === "Ask AI" && <AskAIPanel />}
 
       {tab === "Models" && <ModelsPanel />}
 
