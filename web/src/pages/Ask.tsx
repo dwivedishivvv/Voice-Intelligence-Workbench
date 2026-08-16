@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { api } from "@/api/client";
 import { Dialog } from "@/components/dialog";
 import { useSidebarTakeover } from "@/components/layout";
+import { ExcerptPlayer } from "@/components/excerpt-player";
 import { AMBER_INK, MOOD_COLOR, RED, muted } from "@/lib/ui";
 
 type Lap = { number: number; duration_s: number | null; prev_s: number | null };
@@ -12,7 +13,8 @@ type Citation = {
   sentiment: string | null; sentiment_score: number | null; text_sentiment: string | null;
   speaker: string | null; driver: string | null; driver_name: string | null;
   team: string | null; session: string | null; year: number | null;
-  clip_id: string | null; start_s: number | null; laps: Lap[] | null;
+  clip_id: string | null; start_s: number | null; end_s: number | null;
+  laps: Lap[] | null;
   mentions: { kind: string; name: string }[] | null;
 };
 type Turn = {
@@ -159,18 +161,15 @@ function EvidenceCard({ c, n, refFn }: {
             </span>
           ))}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        {/* The quote plays here. Checking a citation used to mean navigating to the clip
+            page, which loses the answer you were reading it against — the one comparison
+            the citation exists to let you make. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
           {c.clip_id ? (
-            <a href={`/clips/${c.clip_id}`} style={{ fontSize: 13 }}
-               onClick={(e) => {
-                 e.preventDefault();
-                 navigate(`/clips/${c.clip_id}${c.start_s ? `?t=${c.start_s}` : ""}`);
-               }}>
-              ▶ Listen at {fmtAt(c.start_s)}
-            </a>
+            <ExcerptPlayer clipId={c.clip_id} startS={c.start_s} endS={c.end_s} />
           ) : (
             <span style={{ fontSize: 12.5, color: muted(55) }}>
-              Team radio · no processed clip to open
+              Team radio · no processed audio to play
             </span>
           )}
           <span className="mono" style={{ fontSize: 11.5, color: muted(45) }}>

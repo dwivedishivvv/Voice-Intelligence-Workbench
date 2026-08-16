@@ -30,7 +30,7 @@ OPTIONAL MATCH (sp)-[:NEXT]->(nxt:Speech)
 OPTIONAL MATCH (sp)-[:DURING_LAP]->(lap:Lap)
 OPTIONAL MATCH (sp)-[:MENTIONS]->(ent)
 RETURN sid AS speech_id,
-       sp.text AS text, sp.mood AS mood, sp.start_s AS start_s,
+       sp.text AS text, sp.mood AS mood, sp.start_s AS start_s, sp.end_s AS end_s,
        sp.sentiment AS sentiment, sp.sentiment_score AS sentiment_score,
        sp.text_sentiment AS text_sentiment,
        spk.name AS speaker,
