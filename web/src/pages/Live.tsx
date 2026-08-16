@@ -229,8 +229,36 @@ export default function Live() {
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 24, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Newest first. A live session runs as long as someone keeps talking, so an
+              append-at-the-bottom list walks the newest line off the screen exactly when it
+              matters most — and the live row belongs at the top with it, since that is
+              where the next line will appear. */}
           <div style={{ display: "flex", flexDirection: "column", borderTop: "1px solid var(--color-divider)" }}>
-            {chunks.map((c) => (
+            {recording && (
+              <div style={{
+                display: "grid", gridTemplateColumns: "64px 1fr", gap: 14, padding: "12px 0",
+                borderBottom: `1px solid ${muted(8)}`,
+                background: "color-mix(in srgb, var(--color-accent) 6%, transparent)",
+              }}>
+                <span className="mono" style={{ fontSize: 12, color: "var(--color-accent)" }}>
+                  {fmtElapsed(elapsedMs)}
+                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className="mono" style={{ fontSize: 12, color: muted(55) }}>
+                    {pending > 0 ? `transcribing ${pending} chunk${pending === 1 ? "" : "s"}`
+                      : speaking ? "hearing you · chunk closes at the next pause"
+                      : "listening · chunk closes at the next pause"}
+                  </span>
+                  <span ref={liveBarsRef} style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 14 }}>
+                    {Array.from({ length: 14 }, (_, i) => (
+                      <span key={i} style={{ width: 3, height: 2, background: "var(--color-accent-400)" }} />
+                    ))}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {[...chunks].reverse().map((c) => (
               <div key={c.seq} style={{
                 display: "grid", gridTemplateColumns: "64px 1fr", gap: 14, padding: "12px 0",
                 borderBottom: `1px solid ${muted(8)}`,
@@ -268,30 +296,6 @@ export default function Live() {
                 </div>
               </div>
             ))}
-
-            {recording && (
-              <div style={{
-                display: "grid", gridTemplateColumns: "64px 1fr", gap: 14, padding: "12px 0",
-                borderBottom: `1px solid ${muted(8)}`,
-                background: "color-mix(in srgb, var(--color-accent) 6%, transparent)",
-              }}>
-                <span className="mono" style={{ fontSize: 12, color: "var(--color-accent)" }}>
-                  {fmtElapsed(elapsedMs)}
-                </span>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span className="mono" style={{ fontSize: 12, color: muted(55) }}>
-                    {pending > 0 ? `transcribing ${pending} chunk${pending === 1 ? "" : "s"}`
-                      : speaking ? "hearing you · chunk closes at the next pause"
-                      : "listening · chunk closes at the next pause"}
-                  </span>
-                  <span ref={liveBarsRef} style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 14 }}>
-                    {Array.from({ length: 14 }, (_, i) => (
-                      <span key={i} style={{ width: 3, height: 2, background: "var(--color-accent-400)" }} />
-                    ))}
-                  </span>
-                </div>
-              </div>
-            )}
 
             {!recording && chunks.length === 0 && (
               <p style={{ padding: "24px 0", fontSize: 13, color: muted(55) }}>
