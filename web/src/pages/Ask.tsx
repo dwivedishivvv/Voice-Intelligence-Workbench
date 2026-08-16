@@ -1,80 +1,57 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/api/client";
-import { PageHeader } from "@/components/page-header";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { MOOD_STYLE, type Mood } from "@/lib/mood";
-import { cn } from "@/lib/utils";
-import {
-  Sparkles, Search, Radar, Route, Users, Send, Loader2, PlayCircle,
-  AlertTriangle, Quote, CornerDownLeft,
-} from "lucide-react";
+import { Dialog } from "@/components/dialog";
+import { useSidebarTakeover } from "@/components/layout";
+import { AMBER_INK, MOOD_COLOR, RED, muted } from "@/lib/ui";
 
 type Lap = { number: number; duration_s: number | null; prev_s: number | null };
 type Citation = {
-  speech_id: string;
-  text: string | null;
-  mood: Mood | null;
-  sentiment: string | null;
-  sentiment_score: number | null;
-  text_sentiment: string | null;
-  speaker: string | null;
-  driver: string | null;
-  driver_name: string | null;
-  team: string | null;
-  session: string | null;
-  year: number | null;
-  clip_id: string | null;
-  start_s: number | null;
-  laps: Lap[] | null;
+  speech_id: string; text: string | null; mood: string | null;
+  sentiment: string | null; sentiment_score: number | null; text_sentiment: string | null;
+  speaker: string | null; driver: string | null; driver_name: string | null;
+  team: string | null; session: string | null; year: number | null;
+  clip_id: string | null; start_s: number | null; laps: Lap[] | null;
   mentions: { kind: string; name: string }[] | null;
 };
 type Turn = {
-  question: string;
-  answer: string;
-  citations: string[];
-  sources: string[];
-  citation_details: Citation[];
-  tools_used: string[];
+  question: string; answer: string; citations: string[]; sources: string[];
+  citation_details: Citation[]; tools_used: string[];
   usage: { input_tokens: number; output_tokens: number };
-  model: string;
-  provider: string;
-  refused: boolean;
-  detail: string | null;
+  model: string; provider: string; refused: boolean; detail: string | null;
 };
+type Thread = { id: string; title: string; created: number; turns: Turn[] };
 
-const TOOL_META: Record<string, { label: string; icon: typeof Search }> = {
-  search_speech: { label: "Searching the corpus", icon: Search },
-  expand_speech: { label: "Pulling the surrounding context", icon: Radar },
-  driver_timeline: { label: "Walking the lap timeline", icon: Route },
-  compare_speakers: { label: "Comparing speakers", icon: Users },
+const STORE = "ask_threads";
+
+/** Threads live in the browser. The API answers one question at a time and keeps no
+ *  conversation of its own, so the history in the sidebar is this machine's, and deleting
+ *  a thread deletes the conversation — never the clips it cited. */
+function loadThreads(): Thread[] {
+  try { return JSON.parse(localStorage.getItem(STORE) || "[]"); } catch { return []; }
+}
+function saveThreads(t: Thread[]) {
+  localStorage.setItem(STORE, JSON.stringify(t.slice(0, 60)));
+}
+
+const TOOL_LABEL: Record<string, string> = {
+  search_speech: "searched the corpus",
+  expand_speech: "pulled surrounding context",
+  driver_timeline: "walked the lap timeline",
+  compare_speakers: "compared speakers",
 };
 
 const EXAMPLES = [
-  "What did Albon say about power, and which lap was it on?",
   "Which radio calls sound stressed, and what was happening?",
+  "Where do the text and voice readings disagree?",
   "Find anything about tyre wear and who said it",
 ];
 
-/** A cited id, rendered inline as a chip that scrolls to its evidence card. */
-function CiteChip({ id, index, onJump }: { id: string; index: number; onJump: (id: string) => void }) {
-  return (
-    <button
-      onClick={() => onJump(id)}
-      title={id}
-      className="mx-0.5 inline-flex translate-y-[-1px] items-center rounded-md border border-primary/30 bg-primary/10 px-1.5 py-0 text-[11px] font-medium text-primary transition-colors hover:bg-primary/20"
-    >
-      {index}
-    </button>
-  );
-}
+const fmtAt = (s: number | null) =>
+  s == null ? "the clip" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
-/** Split the answer on cited ids so each becomes a chip, leaving the prose intact. */
+/** The answer with its cited ids turned into numbered chips that jump to the evidence. */
 function AnswerBody({ text, order, onJump }: {
   text: string; order: string[]; onJump: (id: string) => void;
 }) {
@@ -86,113 +63,168 @@ function AnswerBody({ text, order, onJump }: {
       if (m.index > last) out.push(<span key={key++}>{text.slice(last, m.index)}</span>);
       const id = m[1].toLowerCase();
       const idx = order.indexOf(id);
-      out.push(<CiteChip key={key++} id={id} index={idx >= 0 ? idx + 1 : 0} onJump={onJump} />);
+      out.push(
+        <a key={key++} href="#" title={id}
+           onClick={(e) => { e.preventDefault(); onJump(id); }}
+           className="mono"
+           style={{ fontSize: 11, padding: "1px 5px", border: "1px solid var(--color-accent)" }}>
+          {idx >= 0 ? idx + 1 : "·"}
+        </a>);
       last = m.index + m[0].length;
     }
     if (last < text.length) out.push(<span key={key++}>{text.slice(last)}</span>);
     return out;
   }, [text, order, onJump]);
 
-  return <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-foreground">{parts}</p>;
+  return (
+    <p style={{ margin: 0, fontSize: 16, lineHeight: 1.65, textWrap: "pretty" } as React.CSSProperties}>
+      {parts}
+    </p>
+  );
 }
 
-function EvidenceCard({ c, index, refFn }: {
-  c: Citation; index: number; refFn: (el: HTMLDivElement | null) => void;
+function EvidenceCard({ c, n, refFn }: {
+  c: Citation; n: number; refFn: (el: HTMLDivElement | null) => void;
 }) {
+  const navigate = useNavigate();
   const who = c.driver_name || c.driver || c.speaker || "unidentified speaker";
   const lap = c.laps?.[0];
-  const delta = lap && lap.duration_s != null && lap.prev_s != null ? lap.duration_s - lap.prev_s : null;
-  // Only the fused read differing from the text read is worth calling out — that
-  // disagreement is signal the pipeline stores separately on purpose.
+  const delta = lap && lap.duration_s != null && lap.prev_s != null
+    ? lap.duration_s - lap.prev_s : null;
   const disagrees = c.text_sentiment && c.sentiment && c.text_sentiment !== c.sentiment;
 
   return (
-    <div ref={refFn} className="scroll-mt-24">
-      <Card className="border-border/70 transition-colors hover:border-primary/40">
-        <CardContent className="space-y-2.5 p-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-primary/15 text-[11px] font-semibold text-primary">
-              {index}
+    <article ref={refFn} className="blueprint" style={{
+      padding: "15px 16px", display: "grid", gridTemplateColumns: "28px 1fr",
+      gap: 14, scrollMarginTop: 24,
+    }}>
+      <span className="mono" style={{
+        fontSize: 12, color: "var(--color-accent)", border: "1px solid var(--color-accent)",
+        height: 24, display: "grid", placeItems: "center",
+      }}>
+        {n > 0 ? n : "·"}
+      </span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 9, minWidth: 0 }}>
+        <div className="mono" style={{
+          display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+          fontSize: 11.5, color: muted(60),
+        }}>
+          <span style={{ fontFamily: "var(--font-heading)", fontSize: 15, color: "var(--color-text)" }}>
+            {who}
+          </span>
+          {c.team && <span>{c.team}</span>}
+          {c.session && <span>{c.session}{c.year ? ` ${c.year}` : ""}</span>}
+          {lap && (
+            <span>
+              lap {lap.number}
+              {lap.duration_s != null && ` · ${lap.duration_s.toFixed(1)}s`}
+              {delta != null && ` (${delta >= 0 ? "+" : ""}${delta.toFixed(1)})`}
             </span>
-            <span className="text-sm font-medium">{who}</span>
-            {c.team && <span className="text-xs text-muted-foreground">{c.team}</span>}
-            {c.session && (
-              <Badge variant="outline" className="text-[11px]">
-                {c.session}{c.year ? ` ${c.year}` : ""}
-              </Badge>
-            )}
-            {lap && (
-              <Badge variant="outline" className="font-mono text-[11px]">
-                lap {lap.number}
-                {lap.duration_s != null && ` · ${lap.duration_s.toFixed(1)}s`}
-                {delta != null && ` (${delta >= 0 ? "+" : ""}${delta.toFixed(1)})`}
-              </Badge>
-            )}
-          </div>
-
-          {c.text && (
-            <div className="flex gap-2">
-              <Quote className="mt-1 size-3.5 shrink-0 text-muted-foreground/60" />
-              <p className="text-sm leading-relaxed text-foreground/90">{c.text}</p>
-            </div>
           )}
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            {/* Phrased as readings, never as facts: tone is a threshold heuristic over
-                acoustic features, not a trained emotion model. */}
-            {c.mood && (
-              <Badge variant="outline" className={cn("text-[11px]", MOOD_STYLE[c.mood])}>
-                voice reads {c.mood}
-              </Badge>
-            )}
-            {c.sentiment && (
-              <Badge variant="outline" className="text-[11px]">
-                words read {c.sentiment}
-                {c.sentiment_score != null && ` (${c.sentiment_score > 0 ? "+" : ""}${c.sentiment_score.toFixed(2)})`}
-              </Badge>
-            )}
-            {disagrees && (
-              <Badge variant="outline" className="border-warning/30 bg-warning/10 text-[11px] text-warning">
-                text alone reads {c.text_sentiment}
-              </Badge>
-            )}
-            {(c.mentions ?? []).filter((m) => m.name).map((m) => (
-              <Badge key={`${m.kind}-${m.name}`} variant="secondary" className="text-[11px]">
-                mentions {m.name}
-              </Badge>
-            ))}
-          </div>
-
+        </div>
+        {c.text && (
+          <p style={{
+            margin: 0, fontSize: 15, lineHeight: 1.6,
+            borderLeft: "2px solid var(--color-divider)", paddingLeft: 12,
+          }}>
+            {c.text}
+          </p>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          {c.mood && (
+            <span className="tag mono" style={{
+              border: `1px solid ${MOOD_COLOR[c.mood] || "var(--color-neutral-300)"}`,
+              color: MOOD_COLOR[c.mood] || undefined,
+            }}>
+              voice · {c.mood}
+            </span>
+          )}
+          {c.sentiment && (
+            <span className="tag tag-neutral mono" style={{ border: "1px solid var(--color-neutral-300)" }}>
+              text · {c.sentiment}
+              {c.sentiment_score != null && ` ${c.sentiment_score > 0 ? "+" : ""}${c.sentiment_score.toFixed(2)}`}
+            </span>
+          )}
+          {disagrees && (
+            <span style={{ fontSize: 11.5, color: AMBER_INK }}>
+              text and voice disagree here
+            </span>
+          )}
+          {(c.mentions ?? []).filter((m) => m.name).map((m) => (
+            <span key={`${m.kind}-${m.name}`} className="tag tag-neutral" style={{ border: "1px solid var(--color-neutral-300)" }}>
+              mentions {m.name}
+            </span>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           {c.clip_id ? (
-            <Link
-              to={`/clips/${c.clip_id}${c.start_s ? `?t=${c.start_s}` : ""}`}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-            >
-              <PlayCircle className="size-3.5" />
-              Listen at {c.start_s != null ? `${Math.floor(c.start_s / 60)}:${String(Math.floor(c.start_s % 60)).padStart(2, "0")}` : "the clip"}
-            </Link>
+            <a href={`/clips/${c.clip_id}`} style={{ fontSize: 13 }}
+               onClick={(e) => {
+                 e.preventDefault();
+                 navigate(`/clips/${c.clip_id}${c.start_s ? `?t=${c.start_s}` : ""}`);
+               }}>
+              ▶ Listen at {fmtAt(c.start_s)}
+            </a>
           ) : (
-            // Radio calls have no clip row unless they are put through the full pipeline.
-            <span className="text-xs text-muted-foreground">Team radio · no processed clip to open</span>
+            <span style={{ fontSize: 12.5, color: muted(55) }}>
+              Team radio · no processed clip to open
+            </span>
           )}
-        </CardContent>
-      </Card>
-    </div>
+          <span className="mono" style={{ fontSize: 11.5, color: muted(45) }}>
+            {c.speech_id.slice(0, 8)}
+          </span>
+        </div>
+      </div>
+    </article>
   );
 }
 
 export default function Ask() {
+  const navigate = useNavigate();
+  const [threads, setThreads] = useState<Thread[]>(loadThreads);
+  const [activeId, setActiveId] = useState<string | null>(threads[0]?.id ?? null);
   const [question, setQuestion] = useState("");
-  const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<string[]>([]);
   const [disabled, setDisabled] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [deleting, setDeleting] = useState<Thread | null>(null);
+  const [corpus, setCorpus] = useState<{ clips: number; utterances: number } | null>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
-  const wsRef = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const active = threads.find((t) => t.id === activeId) || null;
 
   useEffect(() => () => wsRef.current?.close(), []);
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [turns, activity]);
+  useEffect(() => { saveThreads(threads); }, [threads]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [active?.turns, activity]);
+  useEffect(() => {
+    api.stats().then((s) => setCorpus({ clips: s.total_clips, utterances: 0 })).catch(() => {});
+  }, []);
+
+  function newThread() { setActiveId(null); setQuestion(""); }
+
+  function removeThread(t: Thread) {
+    setThreads((prev) => prev.filter((x) => x.id !== t.id));
+    if (activeId === t.id) setActiveId(null);
+    setDeleting(null);
+  }
+
+  function exportThread() {
+    if (!active) return;
+    const body = active.turns.map((t) =>
+      `## ${t.question}\n\n${t.answer}\n\n${t.citation_details.map((c, i) =>
+        `[${i + 1}] ${c.speaker || c.driver_name || "unknown"} — “${c.text || ""}”`).join("\n")}`
+    ).join("\n\n---\n\n");
+    const url = URL.createObjectURL(new Blob([`# ${active.title}\n\n${body}\n`], { type: "text/markdown" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${active.title.replace(/[^\w-]+/g, "_")}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   function jumpTo(id: string) {
     cardRefs.current.get(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -204,24 +236,33 @@ export default function Ask() {
     setActivity([]);
     setDisabled(null);
 
-    // The websocket is opened *before* the request so no early tool event is missed —
-    // redis pub/sub has no replay. It carries progress only; the answer comes back in the
-    // response body, so a dropped socket costs the live view, never the result.
+    // The socket opens before the request so no early tool event is missed — redis pub/sub
+    // has no replay. It carries progress only; the answer comes back in the response body.
     const conversationId = crypto.randomUUID();
     const ws = new WebSocket(`${location.origin.replace("http", "ws")}/v1/ws/jobs/${conversationId}`);
     wsRef.current = ws;
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data);
-      if (msg.type !== "agent") return;
-      if (msg.kind === "tool_use") {
-        const meta = TOOL_META[msg.tool];
-        setActivity((prev) => [...prev, meta ? meta.label : msg.tool]);
-      }
+      if (msg.type !== "agent" || msg.kind !== "tool_use") return;
+      setActivity((prev) => [...prev, TOOL_LABEL[msg.tool] || msg.tool]);
     };
 
     try {
-      const res = await api.agentAsk(q, null, conversationId);
-      setTurns((prev) => [...prev, { question: q, ...res }]);
+      const history = active?.turns.map((t) => ({ question: t.question, answer: t.answer })) ?? null;
+      const res = await api.agentAsk(q, history, conversationId);
+      const turn: Turn = { question: q, ...res };
+      setThreads((prev) => {
+        if (active) {
+          return prev.map((t) => t.id === active.id ? { ...t, turns: [...t.turns, turn] } : t);
+        }
+        const t: Thread = {
+          id: conversationId,
+          title: q.length > 48 ? `${q.slice(0, 48)}…` : q,
+          created: Date.now(), turns: [turn],
+        };
+        setActiveId(t.id);
+        return [t, ...prev];
+      });
       setQuestion("");
     } catch (err) {
       const detail = String(err);
@@ -235,166 +276,326 @@ export default function Ask() {
     }
   }
 
-  return (
-    <div className="flex h-full flex-col">
-      <PageHeader
-        title="Ask"
-        description="Question the corpus. Every claim is cited back to the recording it came from."
-      />
+  // ── sidebar: thread history replaces the nav while Ask is open ──────────
+  const groups = useMemo(() => {
+    const day = 86_400_000;
+    const now = Date.now();
+    const bucket = (t: Thread) =>
+      now - t.created < day ? "Today" : now - t.created < 2 * day ? "Yesterday" : "Earlier";
+    const out: { label: string; items: Thread[] }[] = [];
+    for (const label of ["Today", "Yesterday", "Earlier"]) {
+      const items = threads.filter((t) => bucket(t) === label);
+      if (items.length) out.push({ label, items });
+    }
+    return out;
+  }, [threads]);
 
-      <div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">
-        {disabled && (
-          <Alert className="border-warning/30 bg-warning/10">
-            <AlertTriangle className="size-4 text-warning" />
-            <AlertTitle>The agent is turned off</AlertTitle>
-            <AlertDescription className="space-y-1.5 text-sm">
-              <p className="text-muted-foreground">{disabled}</p>
-              <p className="text-muted-foreground">
-                This is the one feature that sends transcript text off the box, so it is
-                disabled by default and set in <code className="text-foreground">.env</code>,
-                not from the Settings page. Set <code className="text-foreground">LLM_ENABLED=true</code>
-                {" "}with a provider key, then restart the API.
-              </p>
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {turns.length === 0 && !busy && (
-          <div className="mx-auto max-w-2xl space-y-6 pt-10 text-center">
-            <div className="mx-auto flex size-12 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-chart-5 shadow-lg shadow-primary/20">
-              <Sparkles className="size-6 text-primary-foreground" strokeWidth={2} />
-            </div>
-            <div className="space-y-1.5">
-              <h2 className="text-lg font-semibold">Ask about anything in the corpus</h2>
-              <p className="text-sm text-muted-foreground">
-                Searches transcripts and team radio, follows the graph to laps, speakers and
-                mentions, and cites what it used.
-              </p>
-            </div>
-            <div className="space-y-2">
-              {EXAMPLES.map((ex) => (
+  useSidebarTakeover(
+    <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1, padding: "0 8px" }}>
+      <button className="btn btn-primary" style={{ margin: "0 4px 12px", fontSize: 13 }} onClick={newThread}>
+        New chat
+      </button>
+      <button
+        onClick={() => navigate("/")}
+        style={{
+          display: "flex", alignItems: "center", gap: 8, background: "transparent", border: "none",
+          font: "inherit", fontSize: 12.5, color: muted(60), cursor: "pointer",
+          padding: "4px 14px 12px", textAlign: "left",
+        }}
+      >
+        ← Back to workspace
+      </button>
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+        {groups.map((g) => (
+          <div key={g.label} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <span className="kicker" style={{ letterSpacing: ".14em", padding: "12px 6px 4px", color: muted(42) }}>
+              {g.label}
+            </span>
+            {g.items.map((t) => (
+              <div
+                key={t.id}
+                className="row-hover"
+                onClick={() => setActiveId(t.id)}
+                style={{
+                  display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 8px", cursor: "pointer",
+                  background: t.id === activeId ? "color-mix(in srgb, var(--color-accent) 12%, transparent)" : "transparent",
+                  borderLeft: `2px solid ${t.id === activeId ? "var(--color-accent)" : "transparent"}`,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{
+                    fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                    color: t.id === activeId ? "var(--color-text)" : muted(78),
+                  }}>
+                    {t.title}
+                  </span>
+                  <span className="mono" style={{ fontSize: 10.5, color: muted(42) }}>
+                    {t.turns.length} exchange{t.turns.length === 1 ? "" : "s"} ·{" "}
+                    {new Date(t.created).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                </div>
                 <button
-                  key={ex}
-                  onClick={() => ask(ex)}
-                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-2.5 text-left text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-                >
-                  {ex}
-                  <CornerDownLeft className="size-3.5 shrink-0 opacity-50" />
-                </button>
-              ))}
-            </div>
+                  onClick={(e) => { e.stopPropagation(); setDeleting(t); }}
+                  aria-label="Delete thread"
+                  style={{
+                    background: "transparent", border: "none", font: "inherit", fontSize: 13,
+                    lineHeight: 1, color: muted(35), cursor: "pointer", padding: "2px 0",
+                  }}
+                >×</button>
+              </div>
+            ))}
+          </div>
+        ))}
+        {threads.length === 0 && (
+          <span style={{ padding: "12px 8px", fontSize: 12, color: muted(45) }}>No threads yet.</span>
+        )}
+      </div>
+    </div>,
+    [threads, activeId],
+  );
+
+  const lastTurn = active?.turns[active.turns.length - 1];
+
+  return (
+    <div style={{
+      height: "calc(100vh - 86px)", display: "flex", flexDirection: "column",
+      margin: "0 -34px -60px 0",
+    }}>
+      <header style={{
+        flex: "none", display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: 20, padding: "0 34px 12px 0", borderBottom: "1px solid var(--color-divider)",
+      }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
+          <h3 style={{
+            margin: 0, fontSize: 19, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}>
+            {active?.title || "New question"}
+          </h3>
+          <span className="mono" style={{ fontSize: 11.5, color: muted(50), whiteSpace: "nowrap" }}>
+            {corpus ? `${corpus.clips} clips` : "corpus"}
+            {lastTurn ? ` · ${lastTurn.provider}/${lastTurn.model}` : ""}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 6, flex: "none" }}>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
+                  disabled={!active}
+                  onClick={() => { setRenameDraft(active?.title || ""); setRenaming(true); }}>
+            Rename
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
+                  disabled={!active} onClick={exportThread}>
+            Export thread
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px", color: RED }}
+                  disabled={!active} onClick={() => active && setDeleting(active)}>
+            Delete
+          </button>
+        </div>
+      </header>
+
+      <div style={{
+        flex: 1, minHeight: 0, overflow: "auto", padding: "18px 34px 24px 0",
+        display: "flex", flexDirection: "column", gap: 20, maxWidth: 940,
+      }}>
+        {disabled && (
+          <div style={{ border: `1px solid ${AMBER_INK}`, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
+            <span className="kicker-sm" style={{ color: AMBER_INK }}>The agent is turned off</span>
+            <span style={{ fontSize: 13, color: muted(70) }}>{disabled}</span>
+            <span style={{ fontSize: 13, color: muted(70) }}>
+              This is the one feature that sends transcript text off the box, so it is disabled
+              by default and set in <span className="mono">.env</span>, not from Settings. Set{" "}
+              <span className="mono">LLM_ENABLED=true</span> with a provider key, then restart the API.
+            </span>
           </div>
         )}
 
-        {turns.map((turn, i) => (
-          <div key={i} className="mx-auto max-w-3xl space-y-4">
-            <div className="flex justify-end">
-              <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-primary/10 px-4 py-2.5 text-sm text-foreground">
-                {turn.question}
-              </div>
-            </div>
+        {!active && !busy && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: "62ch" }}>
+            <p style={{ margin: 0, fontSize: 15, lineHeight: 1.6, color: muted(72) }}>
+              Question the corpus. Retrieval runs on the box; only the final wording is composed
+              off-box, and every claim comes back with the clip it came from.
+            </p>
+            {EXAMPLES.map((ex) => (
+              <button key={ex} className="btn btn-secondary"
+                      style={{ justifyContent: "space-between", fontSize: 13, textAlign: "left" }}
+                      onClick={() => ask(ex)}>
+                {ex} <span style={{ opacity: 0.5 }}>↵</span>
+              </button>
+            ))}
+          </div>
+        )}
 
-            <Card className="border-border/70">
-              <CardContent className="space-y-4 p-5">
+        {(active?.turns || []).map((turn, i) => {
+          const cited = turn.citation_details.filter((c) => turn.citations.includes(c.speech_id));
+          const consulted = turn.citation_details.filter((c) => !turn.citations.includes(c.speech_id));
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+                <span className="mono" style={{ fontSize: 11, color: muted(45), width: 44, flex: "none", paddingTop: 4 }}>
+                  you
+                </span>
+                <p style={{
+                  margin: 0, fontSize: 16, lineHeight: 1.55,
+                  borderLeft: "2px solid var(--color-divider)", paddingLeft: 14,
+                }}>
+                  {turn.question}
+                </p>
+              </div>
+
+              {turn.tools_used?.length > 0 && (
+                <div className="mono" style={{
+                  display: "flex", gap: 14, alignItems: "center", fontSize: 11.5,
+                  color: muted(55), flexWrap: "wrap",
+                }}>
+                  {turn.tools_used.map((t, j) => (
+                    <span key={j}>✓ {TOOL_LABEL[t] || t}</span>
+                  ))}
+                </div>
+              )}
+
+              <div style={{
+                borderLeft: "2px solid var(--color-accent)", padding: "2px 0 2px 18px",
+                display: "flex", flexDirection: "column", gap: 10,
+              }}>
                 {turn.refused ? (
-                  <p className="text-sm text-muted-foreground">
+                  <p style={{ margin: 0, fontSize: 15, color: muted(70) }}>
                     The model declined this one.{turn.detail ? ` ${turn.detail}` : ""}
                   </p>
                 ) : turn.answer ? (
                   <AnswerBody text={turn.answer} order={turn.citations} onJump={jumpTo} />
                 ) : (
-                  <p className="text-sm text-muted-foreground">
+                  <p style={{ margin: 0, fontSize: 15, color: muted(70) }}>
                     No answer came back.{turn.detail ? ` ${turn.detail}` : ""}
                   </p>
                 )}
+              </div>
 
-                {turn.citation_details?.length > 0 && (
-                  <div className="space-y-2 border-t border-border pt-4">
-                    {/* "Evidence" only when the model actually cited. When it answered
-                        without ids, these are what its tools showed it — related, but not
-                        a claim-level citation, and labelled so nobody reads it as one. */}
-                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                      {turn.citations?.length ? "Evidence" : "Sources consulted (the model did not cite directly)"}
-                    </p>
-                    {turn.citation_details.map((c) => (
-                      <EvidenceCard
-                        key={c.speech_id}
-                        c={c}
-                        index={turn.citations.indexOf(c.speech_id) + 1}
-                        refFn={(el) => {
-                          if (el) cardRefs.current.set(c.speech_id, el);
-                          else cardRefs.current.delete(c.speech_id);
-                        }}
-                      />
-                    ))}
-                  </div>
-                )}
-
-                {/* Provenance strip: which tools ran, on which model, at what cost. The
-                    agent is the one component that leaves the box, so what it did is not
-                    hidden behind a spinner. */}
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border pt-3 text-[11px] text-muted-foreground">
-                  {turn.tools_used?.length > 0 && (
-                    <span>{turn.tools_used.length} tool call{turn.tools_used.length > 1 ? "s" : ""}: {turn.tools_used.join(" → ")}</span>
-                  )}
-                  <span className="font-mono">{turn.provider}/{turn.model}</span>
-                  {turn.usage && (
-                    <span className="font-mono">
-                      {turn.usage.input_tokens.toLocaleString()} in / {turn.usage.output_tokens.toLocaleString()} out
-                    </span>
-                  )}
+              {cited.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <span className="kicker-sm" style={{ color: muted(55) }}>
+                    Evidence · {cited.length} cited
+                  </span>
+                  {cited.map((c) => (
+                    <EvidenceCard
+                      key={c.speech_id} c={c} n={turn.citations.indexOf(c.speech_id) + 1}
+                      refFn={(el) => { el ? cardRefs.current.set(c.speech_id, el) : cardRefs.current.delete(c.speech_id); }}
+                    />
+                  ))}
                 </div>
-              </CardContent>
-            </Card>
-          </div>
-        ))}
+              )}
+
+              {consulted.length > 0 && (
+                <div className="blueprint hatch" style={{
+                  padding: "13px 16px", display: "flex", flexDirection: "column", gap: 6,
+                }}>
+                  <span className="kicker-sm" style={{ color: AMBER_INK }}>
+                    Sources consulted — the model did not cite these directly
+                  </span>
+                  <span style={{ fontSize: 13, color: muted(70) }}>
+                    {consulted.length} further passage{consulted.length === 1 ? " was" : "s were"} retrieved
+                    and read but not referenced in the answer. They carry no citation authority.
+                  </span>
+                </div>
+              )}
+
+              <div className="mono" style={{
+                display: "flex", gap: 16, paddingTop: 12, borderTop: "1px solid var(--color-divider)",
+                fontSize: 11, color: muted(50), flexWrap: "wrap",
+              }}>
+                {turn.tools_used?.length > 0 && <span>tools: {turn.tools_used.join(", ")}</span>}
+                <span>model: {turn.provider}/{turn.model}</span>
+                {turn.usage && (
+                  <span>
+                    {turn.usage.input_tokens.toLocaleString()} in / {turn.usage.output_tokens.toLocaleString()} out
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
 
         {busy && (
-          <div className="mx-auto max-w-3xl">
-            <Card className="border-border/70">
-              <CardContent className="space-y-2 p-5">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin text-primary" />
-                  Thinking
-                </div>
-                {activity.map((a, i) => {
-                  const meta = Object.values(TOOL_META).find((m) => m.label === a);
-                  const Icon = meta?.icon ?? Search;
-                  return (
-                    <div key={i} className="flex items-center gap-2 pl-6 text-xs text-muted-foreground animate-slide-up">
-                      <Icon className="size-3.5 text-primary/70" />
-                      {a}
-                    </div>
-                  );
-                })}
-              </CardContent>
-            </Card>
+          <div className="mono" style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11.5, color: muted(55) }}>
+            <span className="pulse">· thinking</span>
+            {activity.map((a, i) => <span key={i}>✓ {a}</span>)}
           </div>
+        )}
+
+        {active && (
+          <p style={{ margin: 0, fontSize: 11, color: muted(50) }}>
+            Tone labels are heuristic readings of the audio, not measurements of how anyone felt.
+          </p>
         )}
         <div ref={bottomRef} />
       </div>
 
-      <div className="border-t border-border bg-background px-8 py-4">
-        <div className="mx-auto flex max-w-3xl items-end gap-2">
-          <Textarea
+      <div style={{
+        flex: "none", padding: "14px 34px 18px 0", borderTop: "1px solid var(--color-divider)",
+        background: "var(--color-bg)", display: "flex", flexDirection: "column", gap: 9, maxWidth: 940,
+      }}>
+        <div className="blueprint" style={{ padding: "10px 12px", display: "flex", alignItems: "flex-end", gap: 10 }}>
+          <textarea
+            className="input"
+            rows={2}
             value={question}
+            disabled={busy}
             onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(question); }
             }}
-            placeholder="Ask about the recordings…  (Enter to send, Shift+Enter for a new line)"
-            rows={1}
-            disabled={busy}
-            className="max-h-40 min-h-[42px] resize-none"
+            placeholder="Ask a follow-up. Answers cite clips; nothing is asserted without a citation."
+            style={{
+              flex: 1, resize: "none", border: "none", background: "transparent",
+              padding: "2px 0", fontSize: 15, lineHeight: 1.5, minHeight: 0,
+            }}
           />
-          <Button onClick={() => ask(question)} disabled={busy || !question.trim()} size="icon" className="size-[42px] shrink-0">
-            {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-          </Button>
+          <button className="btn btn-primary" style={{ flex: "none" }}
+                  disabled={busy || !question.trim()} onClick={() => ask(question)}>
+            {busy ? "Asking…" : "Ask"}
+          </button>
         </div>
-        <p className="mx-auto mt-2 max-w-3xl text-[11px] text-muted-foreground">
-          Tone labels are heuristic readings of the audio, not measurements of how anyone felt.
-        </p>
+        <span className="mono" style={{ fontSize: 11, color: muted(45) }}>
+          retrieval local · answer generation off-box
+        </span>
       </div>
+
+      <Dialog
+        open={renaming}
+        onClose={() => setRenaming(false)}
+        kicker="Ask"
+        title="Rename thread"
+        subject={active ? `created ${new Date(active.created).toLocaleString()}` : ""}
+        confirm="Rename"
+        width="440px"
+        onConfirm={() => {
+          setThreads((prev) => prev.map((t) => t.id === activeId ? { ...t, title: renameDraft } : t));
+          setRenaming(false);
+        }}
+      >
+        <div className="field">
+          <label>Thread name</label>
+          <input className="input" value={renameDraft} onChange={(e) => setRenameDraft(e.target.value)} />
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={deleting != null}
+        onClose={() => setDeleting(null)}
+        kicker="Ask · destructive"
+        title="Delete this thread?"
+        subject={deleting ? `${deleting.title} · ${deleting.turns.length} exchanges` : ""}
+        consequence="Not reversible."
+        confirm="Delete thread"
+        cancel="Keep it"
+        danger
+        width="470px"
+        onConfirm={() => deleting && removeThread(deleting)}
+      >
+        <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6 }}>
+          The thread and its {deleting?.turns.length} exchange{deleting?.turns.length === 1 ? "" : "s"} go.
+          The clips it cited are untouched — this deletes the conversation, not the evidence.
+        </p>
+      </Dialog>
     </div>
   );
 }

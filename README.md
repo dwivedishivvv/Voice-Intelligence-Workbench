@@ -8,12 +8,16 @@ no audio and no text ever leaves the box.
 
 Two optional features are the exceptions, both off by default: **Race Radio** fetches F1
 session data from OpenF1, and the **agent layer** (`LLM_ENABLED`) sends transcript excerpts
-to the Anthropic API. With both disabled — the default — the core pipeline makes no
+to a hosted model. With both disabled — the default — the core pipeline makes no
 outbound calls at all.
 
-Three ways in: **batch upload**, **live microphone transcription**, and **Race Radio**, an
-F1 team-radio analyzer that pulls driver radio calls and lines their vocal tone up against
-lap times.
+Two ways in: **batch upload** and **live microphone transcription**. Race Radio is an
+API-only ingestion path (`/v1/f1`) with no screen of its own.
+
+The interface is built on the **Industry** design system: square hairline frames, Barlow
+Condensed headings, monospace for every number, and a four-state vocabulary for
+identification — named, suggested, unknown, and *declined to judge*, the last drawn hatched
+so a refusal never reads as a result.
 
 ![Clip Library](presentation/screenshots/library.png)
 
@@ -26,6 +30,7 @@ lap times.
 - [Quick start](#quick-start)
 - [Running natively on Windows](#running-natively-on-windows)
 - [The screens](#the-screens)
+- [The design system](#the-design-system)
 - [The pipeline, stage by stage](#the-pipeline-stage-by-stage)
 - [Speaker identification model](#speaker-identification-model)
 - [Search](#search)
@@ -59,7 +64,7 @@ lap times.
 | Races | group recordings by race, bulk upload, SVG track outline, per-voice filtering and analysis |
 | Export | SRT, VTT, RTTM, JSON, TXT |
 | Live | mic capture, pause-aligned chunking, transcript + tone read (no per-chunk speaker ID) |
-| Race Radio | OpenF1 session/driver/lap data, radio ingestion, heuristic tone classification |
+| Race Radio | OpenF1 session/driver/lap data, radio ingestion, heuristic tone classification (API only, no UI page) |
 | Ops | structured logs with correlation IDs, Prometheus metrics, hash-chained audit log, deletion receipts |
 | Graph | optional Neo4j projection of clips, speakers, drivers, sessions and laps — a derived read model rebuilt from Postgres |
 | Tuning | every pipeline knob editable live from the UI — applies to the next job, no restart |
@@ -89,7 +94,9 @@ lap times.
 - **postgres** — pgvector for speaker centroids and utterance embeddings (HNSW indexes),
   plus Postgres full-text search over the same utterances.
 - **redis** — arq job queue and the pub/sub channel behind live progress events.
-- **web** — React + Vite + TypeScript, Tailwind and shadcn/ui.
+- **web** — React + Vite + TypeScript on the Industry design system: one hand-written
+  stylesheet of tokens and component classes (`web/src/style.css`), no CSS framework and no
+  component library. Four runtime dependencies in total.
 
 ## Quick start
 
@@ -220,67 +227,134 @@ Hugging Face cache copies instead (`WinError 1314` is the symptom when it doesn'
 
 ## The screens
 
+Eight screens behind one sidebar, which carries live counts for each: Library, Review queue,
+Ask, Upload, Live, Races, Speakers, Settings. Light and dark are both first-class — the
+palette is a set of CSS variables swapped by a `data-theme` attribute, toggled at the bottom
+of the sidebar and remembered per browser.
+
+> The screenshots below predate the Industry redesign and show the previous interface. The
+> behaviour each one describes is current; the styling is not.
+
 ### Upload
 
-Drag in audio or video up to 90 seconds. Validation runs server-side on ingest (container,
-duration, size), then the job is queued and progress streams back over a WebSocket —
-per-stage, with a weighted progress bar rather than a spinner.
+Drop in a folder of audio or video. Validation runs server-side on ingest (container,
+duration, size), then each file is queued and its progress streams back over its own
+WebSocket — per-stage, in a batch table, with a weighted bar per file and a segmented bar
+across the batch. Three files are uploaded at a time; the API streams each to disk, and
+firing everything at once buys no throughput.
+
+Duplicates are recognised by audio rather than filename and jump to the existing result.
+A rejection states its reason and is never retried silently — `Why?` opens the worker's
+own verdict on that file.
 
 ![Upload](presentation/screenshots/upload.png)
 
 ### Clip Library
 
-Every processed recording: duration, status, detected language, speaker count, upload time.
-Filter by filename or flip to **Needs review** for clips the pipeline itself flagged
-(abstained identification, heavy overlap, poor audio grade).
+Every processed recording: duration, status, detected language, voice count, upload time,
+and a **Why it is here** column stating what the pipeline thought. One segmented control
+flips between the whole library and the **Review queue** (`/review`) — clips the pipeline
+itself flagged, because identification hesitated or the audio graded poor. Four counters
+above the table come from `/v1/admin/stats`, split by identification outcome rather than by
+a single accuracy number.
+
+Deleting asks for the filename back, and counts what goes with the clip first — turns,
+words, embeddings, and any profile enrollment that came from it.
 
 ![Clip Library](presentation/screenshots/library.png)
 
 ### Clip detail
 
 Toggle between the original upload and the processed (denoised, loudness-normalized)
-audio. The waveform is segmented per speaker; the transcript is speaker-tagged, word-level
-confidences on hover. Each detected speaker shows talk share, reliability, match score, and
-a **Correct** action that reassigns the turn to the right profile — a correction is training
-data, not just a UI edit: it re-enrolls and recomputes the centroid.
+audio. The waveform is coloured per speaker and hatched wherever the system declined to
+judge; click it to seek.
 
-`Reprocess` reruns the pipeline with current settings. `Export` gives SRT, VTT, RTTM, JSON
-or TXT.
+Each voice gets a card, and which card it gets is the point — the four identification
+outcomes say genuinely different things, so they are never flattened into one confidence
+number:
+
+| Outcome | What it means | What you can do |
+|---|---|---|
+| Confident | A name was written to the turn. Shows the gap to the runner-up. | Correct it |
+| Suggested | Closest profile, under the bar. Nothing has been written. The match bar marks `id_threshold` where the proposal fell short. | Confirm / Reject |
+| Unknown | The audio was good enough to judge, and no profile came close. | Name this voice |
+| Abstained | Reliability under the floor — identification was never attempted, so no match score exists. | Label manually |
+
+The threshold marks on those bars are read from live settings, not hard-coded: they are
+tunable, and a stale mark would be a lie.
+
+The transcript is speaker-tagged with a tone meter per turn; words below 0.5 confidence
+carry a dotted amber underline and their score on hover, and any word seeks on click. The
+side rail splits attribution coverage four ways and keeps text sentiment and voice tone
+apart, counting where they disagree instead of averaging them.
+
+A correction is training data, not a UI edit: it re-enrolls and recomputes the centroid,
+and says so before you save — including that enrollment will be skipped, with a reason, if
+the audio can't support it.
+
+`Reprocess` reruns the pipeline with current settings. `Export SRT` and the other formats
+(VTT, RTTM, JSON, TXT) come off `/v1/clips/{id}/export/{fmt}`.
 
 ![Clip detail](presentation/screenshots/clip-detail.png)
 
 ### Live transcription
 
 Speak into the mic. Each chunk cuts on your next natural pause rather than a fixed timer,
-so words don't get split mid-sentence. Speakers are matched against enrolled profiles where
-possible; otherwise they're labeled for this session only.
+so words don't get split mid-sentence. A live session is transcript and tone only — it does
+not run identification per chunk, and the screen says so rather than showing a name it
+cannot stand behind. The side rail carries the input level, the tone strip across the
+session, and which tools ran locally versus off-box (everything here is local).
 
 ![Live transcription](presentation/screenshots/live.png)
 
-### Race Radio
+### Ask
 
-Pick a year, a Grand Prix, and a driver. Lap times render as a bar chart colored by the
-tone detected in the radio calls made around them — calm, stressed, tired — so you can see
-whether a stressed call lines up with a slower lap. Each radio call is transcribed,
-playable, and re-analyzable on demand.
+Question the corpus. The sidebar hands itself over to thread history while Ask is open;
+threads live in the browser, because the API answers one question at a time and keeps no
+conversation of its own.
 
-![Race Radio](presentation/screenshots/race-radio-viewport.png)
+Every claim comes back with the clip it came from: cited ids become numbered chips in the
+prose that jump to their evidence card, and each card carries the quote, the voice and text
+readings side by side, and a **Listen at** link that lands the player on that second.
+Passages the model read but did not cite are shown separately, hatched, labelled as
+carrying no citation authority. A provenance strip closes each answer with the tools that
+ran, the model, and the token cost — this is the one component that leaves the box, so what
+it did is not hidden behind a spinner.
+
+### Races
+
+A race groups its recordings; filing changes grouping only, and nothing is reprocessed.
+The detail view charts traffic across the weekend by tone, lists the recordings, and
+surfaces **moments worth hearing** — utterances where the two readings disagree, the tone
+reads stressed, or nobody was attributed at all. The side rail splits attribution across
+the weekend into named, grouped-but-unnamed, and unattributed, and links straight into the
+review queue when clips from that race are waiting on a curator.
 
 ### Speaker Directory
 
 Enrolled profiles with enrollment counts and intra-profile cohesion (a low-cohesion warning
 means the enrollments disagree with each other), alongside unclaimed voice clusters awaiting
-review. Merge two profiles, delete one with reassignment, drop a bad enrollment, or promote
-a cluster into a named profile.
+review. Each cluster can be **auditioned** before it is named: the montage endpoint stitches
+that voice's own speech from every clip it appears in, and one plays at a time — two voices
+overlapping is exactly what makes a cluster unrecognisable.
+
+Merging states its arithmetic before you commit (enrollments, speech, cohesion recomputed
+from the combined set) and says plainly that if the two are not the same person, cohesion
+drops and matches get worse — the number after the merge tells you which happened.
 
 ![Speaker Directory](presentation/screenshots/speakers.png)
 
 ### Settings
 
 Every pipeline knob, grouped: Ingest, Pre-processing, Quality grading, Diarization, Speaker
-identification, Transcription, Jobs & retention, Models, System. Changes are stored as
-overrides in the database and picked up by the next job — no restart. Each field shows its
-default and resets individually; the header counts how many are currently overridden.
+identification, Transcription, Jobs & retention, Graph, Models, System. Changes are stored
+as overrides in the database and picked up by the next job — no restart. Each field shows
+its type, default and state (`DEFAULT` / `OVERRIDDEN`) and resets individually; the header
+counts how many are currently overridden.
+
+**Calibrate from my profiles** runs the EER sweep over your own enrollments and shows what
+it would change — `id_threshold` and `verify_threshold`, old value → new, with the measured
+error rate and voice separation behind them. Nothing is written until you apply it.
 
 ![Settings — tuning](presentation/screenshots/settings-tuning.png)
 
@@ -293,6 +367,34 @@ alternative, activate it.
 settings.
 
 ![Settings — system](presentation/screenshots/settings-system.png)
+
+## The design system
+
+`web/src/style.css` is the whole of it — tokens, both palettes, and the component classes
+(`.btn`, `.input`, `.seg`, `.tag`, `.table`, `.blueprint`, `.hatch`). No CSS framework, no
+component library, no build step beyond Vite. Retune the tokens there and every screen
+follows.
+
+| Token group | Purpose |
+|---|---|
+| `--color-bg` / `--color-text` / `--color-divider` | the ground, the ink, the hairline |
+| `--color-accent-100…900`, `--color-neutral-100…900` | one shared OKLCH lightness scale, so the same step of any role matches in visual value |
+| `--sig-voice-a` / `--sig-voice-b` | named and suggested voices |
+| `--sig-green` / `--sig-amber` / `--sig-red` | calm, tired, stressed — and the same three for ok / warn / bad |
+| `--font-heading` (Barlow Condensed) / `--font-body` (Barlow) | headings and prose |
+
+Three rules the screens hold to:
+
+- **Numbers are monospace.** Every score, threshold, duration and id sits in `--font-mono`,
+  so a column of them lines up and a changed digit is visible.
+- **A refusal is not a result.** Anything the system declined to judge is drawn hatched,
+  never as a fifth colour in the speaker palette.
+- **Consequences precede confirmation.** Every dialog states what saving does, in words, in
+  its footer — next to the button that does it.
+
+`web/src/lib/ui.ts` holds the vocabulary in code: the outcome map, the voice palette, tone
+colours, and the formatters. Colours are CSS variables all the way down, so light and dark
+need no JavaScript.
 
 ## The pipeline, stage by stage
 
@@ -352,6 +454,9 @@ that disagrees with its own profile gets flagged rather than silently dragging t
 All three accept `speaker_id` to scope results to one person.
 
 ## Race Radio (F1)
+
+An ingestion path, not a screen — the UI page was removed in the Industry redesign; the
+endpoints below are unchanged and still callable.
 
 The one component that talks to the network. `api/app/routers/f1.py` proxies
 [OpenF1](https://openf1.org) for sessions, drivers, laps and team-radio metadata, then
@@ -587,7 +692,10 @@ worker/
   worker/export/ srt, vtt, rttm, json, txt
   worker/live.py live-mode diarize + identify
   worker/pool.py model pool, loaded once at startup
-web/             React/Vite/TS + Tailwind/shadcn — Library, Upload, Live, Race Radio, ClipDetail, Speakers, Settings
+web/
+  src/style.css  the Industry design system: tokens, light/dark palettes, component classes
+  src/lib/ui.ts  outcome/voice/tone colour vocabulary + the monospace formatters
+  src/pages/     Library (+ Review queue), ClipDetail, Ask, Upload, Live, Races, Speakers, Settings
 db/init.sql      full schema (pgvector + FTS)
 models/          REGISTRY.yaml + prefetch.py, fetched into MODEL_DIR
 tests/unit/      reconciliation, reliability, diarization cleanup, device/model resolution

@@ -1,26 +1,31 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "@/api/client";
-import { PageHeader } from "@/components/page-header";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-import { type Mood, MOOD_STYLE, moodDot } from "@/lib/mood";
-import { Mic, Square, Loader2, AudioLines } from "lucide-react";
+import { AMBER, AMBER_INK, GREEN, MOOD_COLOR, MOOD_PCT, RED, muted, tagTone } from "@/lib/ui";
 
 // VAD-driven chunk boundaries: cut on a natural pause instead of an arbitrary timer, so
-// chunks end at sentence/phrase breaks rather than mid-word — the single biggest source
-// of garbled live text. Naive fixed-threshold energy VAD (not adaptive to noise floor or
+// chunks end at sentence/phrase breaks rather than mid-word — the single biggest source of
+// garbled live text. Naive fixed-threshold energy VAD (not adaptive to the noise floor or
 // mic gain) — good enough to find pauses in a normal room; may need retuning on a very
 // noisy input or a hot mic.
 const SPEECH_RMS_THRESHOLD = 0.02;
-const PAUSE_MS = 600; // silence this long after speech = natural end of phrase, cut here
+const PAUSE_MS = 600;      // silence this long after speech = end of phrase, cut here
 const MIN_CHUNK_MS = 1200; // don't cut on a micro-pause before this much has been said
 const MAX_CHUNK_MS = 12000; // hard cap so continuous talk without a pause can't grow forever
-const LEVEL_NORMALIZER = 0.12; // rms value that reads as "full" on the level ring
+const LEVEL_NORMALIZER = 0.12;
 
 type ChunkStatus = "pending" | "done" | "error";
-type Chunk = { seq: number; text: string; status: ChunkStatus; mood?: Mood; t: number };
+type Chunk = { seq: number; text: string; status: ChunkStatus; mood?: string; t: number };
 type VadState = { start: number; hasSpeech: boolean; silenceSince: number | null };
+
+const TOOLS: [string, "local" | "off-box"][] = [
+  ["transcribe_chunk", "local"],
+  ["tone_readings", "local"],
+  ["voice_activity", "local"],
+  ["store_session", "local"],
+  ["search_corpus", "local"],
+  ["compose_answer", "off-box"],
+];
 
 function fmtElapsed(ms: number) {
   const s = Math.floor(ms / 1000);
@@ -28,10 +33,12 @@ function fmtElapsed(ms: number) {
 }
 
 export default function Live() {
+  const navigate = useNavigate();
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [startedAt, setStartedAt] = useState<Date | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const sessionStartRef = useRef(0);
   const seqRef = useRef(0);
@@ -46,7 +53,8 @@ export default function Live() {
   const vadBufRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const vadStateRef = useRef<VadState>({ start: 0, hasSpeech: false, silenceSince: null });
   const rafRef = useRef<number | null>(null);
-  const levelRingRef = useRef<HTMLSpanElement>(null);
+  const levelRef = useRef<HTMLSpanElement>(null);
+  const liveBarsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => () => stop(), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -61,13 +69,17 @@ export default function Live() {
       sumSquares += v * v;
     }
     const rms = Math.sqrt(sumSquares / buf.length);
+    const level = Math.min(1, rms / LEVEL_NORMALIZER);
 
-    // drive the level ring directly via the DOM, not React state — this runs every
-    // animation frame and a state-driven re-render at 60fps would be wasteful
-    if (levelRingRef.current) {
-      const level = Math.min(1, rms / LEVEL_NORMALIZER);
-      levelRingRef.current.style.transform = `scale(${1 + level * 0.5})`;
-      levelRingRef.current.style.opacity = String(0.12 + level * 0.5);
+    // driven through the DOM, not React state — this runs every animation frame and a
+    // state-driven re-render at 60fps would be pure waste
+    if (levelRef.current) levelRef.current.style.width = `${Math.round(level * 100)}%`;
+    if (liveBarsRef.current) {
+      const bars = liveBarsRef.current.children;
+      for (let i = 0; i < bars.length; i++) {
+        const jitter = 0.35 + 0.65 * Math.abs(Math.sin(performance.now() / 120 + i));
+        (bars[i] as HTMLElement).style.height = `${Math.max(2, Math.round(level * 14 * jitter))}px`;
+      }
     }
 
     const state = vadStateRef.current;
@@ -82,18 +94,17 @@ export default function Live() {
     setSpeaking((prev) => (prev !== isSpeech ? isSpeech : prev));
 
     const elapsed = now - state.start;
-    const pausedLongEnough = state.hasSpeech && state.silenceSince != null && (now - state.silenceSince) >= PAUSE_MS;
+    const pausedLongEnough = state.hasSpeech && state.silenceSince != null
+      && (now - state.silenceSince) >= PAUSE_MS;
     const shouldCut = (elapsed >= MIN_CHUNK_MS && pausedLongEnough) || elapsed >= MAX_CHUNK_MS;
+    if (shouldCut && recorderRef.current?.state === "recording") recorderRef.current.stop();
 
-    if (shouldCut && recorderRef.current?.state === "recording") {
-      recorderRef.current.stop();
-    }
     rafRef.current = requestAnimationFrame(vadTick);
   }
 
-  // MediaRecorder chunks from a single continuous recording aren't independently
-  // decodable (only the first has a full container header) — so each VAD-bounded
-  // window is its own start/stop recorder instance, each a self-contained webm file.
+  // MediaRecorder chunks from a single continuous recording aren't independently decodable
+  // (only the first carries a container header) — so each VAD-bounded window is its own
+  // start/stop recorder instance, each a self-contained webm file.
   function recordOneChunk(stream: MediaStream) {
     if (stopRequestedRef.current) return;
     const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
@@ -104,10 +115,11 @@ export default function Live() {
 
     recorder.ondataavailable = (e) => { if (e.data.size > 0) parts.push(e.data); };
     recorder.onstop = async () => {
-      const hadSpeech = vadStateRef.current.hasSpeech;
-      if (hadSpeech) {
+      if (vadStateRef.current.hasSpeech) {
         const blob = new Blob(parts, { type: "audio/webm" });
-        setChunks((prev) => [...prev, { seq, text: "", status: "pending", t: performance.now() - sessionStartRef.current }]);
+        setChunks((prev) => [...prev, {
+          seq, text: "", status: "pending", t: performance.now() - sessionStartRef.current,
+        }]);
         try {
           await api.uploadLiveChunk(sessionIdRef.current!, seq, blob);
         } catch {
@@ -127,6 +139,7 @@ export default function Live() {
     sessionStartRef.current = performance.now();
     setChunks([]);
     setElapsedMs(0);
+    setStartedAt(new Date());
 
     const audioCtx = new AudioContext();
     const analyser = audioCtx.createAnalyser();
@@ -142,7 +155,7 @@ export default function Live() {
     const ws = new WebSocket(`${location.origin.replace("http", "ws")}/v1/ws/jobs/${sessionId}`);
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data) as {
-        type: string; seq: number; text: string; mood?: Mood; error?: string;
+        type: string; seq: number; text: string; mood?: string; error?: string;
       };
       if (msg.type !== "live_transcript") return;
       setChunks((prev) => prev.map((c) =>
@@ -173,147 +186,258 @@ export default function Live() {
     setSpeaking(false);
   }
 
-  const transcript = chunks.map((c) => c.text).filter(Boolean).join(" ");
-  const pendingCount = chunks.filter((c) => c.status === "pending").length;
-  const doneChunks = chunks.filter((c) => c.status === "done" && c.mood);
-  const currentMood = doneChunks.length ? doneChunks[doneChunks.length - 1].mood : undefined;
-  const wordCount = transcript ? transcript.trim().split(/\s+/).length : 0;
+  const done = chunks.filter((c) => c.status === "done");
+  const pending = chunks.filter((c) => c.status === "pending").length;
+  const flagged = [...done].reverse().find((c) => c.mood === "stressed" && c.text);
+  const words = done.map((c) => c.text).join(" ").trim().split(/\s+/).filter(Boolean).length;
 
   return (
-    <div>
-      <PageHeader
-        title="Live transcription"
-        description="Speak into your mic — each chunk cuts on your next pause, not a fixed timer, so words don't get split mid-sentence. Transcript and stress read only; upload a recording for speaker identification and quality analysis."
-      />
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <header style={{
+        display: "flex", alignItems: "flex-end", justifyContent: "space-between",
+        gap: 20, flexWrap: "wrap",
+      }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          <span className="kicker">
+            {startedAt
+              ? `Live session · started ${startedAt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`
+              : "Live session · not started"}
+          </span>
+          <h2 style={{ margin: 0, fontSize: 30 }}>Microphone channel</h2>
+          <p style={{ margin: 0, maxWidth: "66ch", fontSize: 14, color: muted(68) }}>
+            Transcription and tone readings run on the box as the audio arrives. Chunks close
+            at natural pauses, not on a timer. Identification is not run per chunk — upload a
+            recording when you need voices matched against enrolled profiles.
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {recording && (
+            <span className="mono" style={{
+              display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "6px 10px",
+              border: `1px solid ${RED}`, color: RED,
+            }}>
+              <span style={{ width: 7, height: 7, background: RED, borderRadius: "50%" }} />
+              REC {fmtElapsed(elapsedMs)}
+            </span>
+          )}
+          <button className={recording ? "btn btn-secondary" : "btn btn-primary"}
+                  onClick={recording ? stop : start}>
+            {recording ? "Stop" : "Start listening"}
+          </button>
+        </div>
+      </header>
 
-      <div className="mx-auto max-w-2xl px-8 py-10">
-        <div className="flex flex-col items-center">
-          <div className="relative flex size-28 items-center justify-center">
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 24, alignItems: "start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", flexDirection: "column", borderTop: "1px solid var(--color-divider)" }}>
+            {chunks.map((c) => (
+              <div key={c.seq} style={{
+                display: "grid", gridTemplateColumns: "64px 1fr", gap: 14, padding: "12px 0",
+                borderBottom: `1px solid ${muted(8)}`,
+              }}>
+                <span className="mono" style={{ fontSize: 12, color: muted(50) }}>{fmtElapsed(c.t)}</span>
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <span style={{ fontFamily: "var(--font-heading)", fontSize: 15, color: muted(70) }}>
+                      Speaker (unnamed)
+                    </span>
+                    <span className="kicker-sm" style={{ letterSpacing: ".1em", color: muted(50) }}>
+                      {c.status === "pending" ? "transcribing" : c.status === "error" ? "failed" : "session chunk"}
+                    </span>
+                    {c.mood && (
+                      <span className="mono" style={{
+                        display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: muted(55),
+                      }}>
+                        <span style={{ width: 26, height: 5, background: muted(12), display: "inline-block", position: "relative" }}>
+                          <span style={{
+                            position: "absolute", left: 0, top: 0, bottom: 0,
+                            width: MOOD_PCT[c.mood] || "30%", background: MOOD_COLOR[c.mood] || muted(40),
+                          }} />
+                        </span>
+                        {c.mood}
+                      </span>
+                    )}
+                  </div>
+                  <p style={{
+                    margin: 0, fontSize: 15, lineHeight: 1.55,
+                    color: c.status === "done" ? "var(--color-text)" : muted(60),
+                  }}>
+                    {c.status === "pending" ? "…" : c.status === "error" ? "chunk failed to transcribe"
+                      : c.text || "(no speech detected)"}
+                  </p>
+                </div>
+              </div>
+            ))}
+
             {recording && (
-              <span
-                ref={levelRingRef}
-                className={cn(
-                  "absolute inset-0 rounded-full transition-colors duration-300",
-                  currentMood ? moodDot(currentMood) : "bg-primary"
-                )}
-                style={{ opacity: 0.12 }}
-              />
-            )}
-            <Button
-              onClick={recording ? stop : start}
-              variant={recording ? "destructive" : "default"}
-              className={cn(
-                "relative z-10 size-20 rounded-full shadow-lg transition-transform hover:scale-105 active:scale-95",
-                recording ? "shadow-destructive/20" : "shadow-primary/20"
-              )}
-            >
-              {recording ? <Square className="size-6 fill-current" /> : <Mic className="size-7" />}
-            </Button>
-          </div>
-
-          <div className="mt-4 flex items-center gap-2 text-sm">
-            {recording ? (
-              <span className="flex items-center gap-2 text-muted-foreground">
-                <span className="relative flex size-2">
-                  <span className={cn(
-                    "absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
-                    speaking ? "bg-primary" : "bg-destructive"
-                  )} />
-                  <span className={cn("relative inline-flex size-2 rounded-full", speaking ? "bg-primary" : "bg-destructive")} />
+              <div style={{
+                display: "grid", gridTemplateColumns: "64px 1fr", gap: 14, padding: "12px 0",
+                borderBottom: `1px solid ${muted(8)}`,
+                background: "color-mix(in srgb, var(--color-accent) 6%, transparent)",
+              }}>
+                <span className="mono" style={{ fontSize: 12, color: "var(--color-accent)" }}>
+                  {fmtElapsed(elapsedMs)}
                 </span>
-                {pendingCount > 0 && <Loader2 className="size-3.5 animate-spin" />}
-                {pendingCount > 0
-                  ? `transcribing chunk ${chunks.length - pendingCount + 1}…`
-                  : speaking ? "hearing you…" : "listening for a pause…"}
-              </span>
-            ) : (
-              <span className="text-muted-foreground">Tap to start listening</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className="mono" style={{ fontSize: 12, color: muted(55) }}>
+                    {pending > 0 ? `transcribing ${pending} chunk${pending === 1 ? "" : "s"}`
+                      : speaking ? "hearing you · chunk closes at the next pause"
+                      : "listening · chunk closes at the next pause"}
+                  </span>
+                  <span ref={liveBarsRef} style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 14 }}>
+                    {Array.from({ length: 14 }, (_, i) => (
+                      <span key={i} style={{ width: 3, height: 2, background: "var(--color-accent-400)" }} />
+                    ))}
+                  </span>
+                </div>
+              </div>
             )}
-            {currentMood && (
-              <Badge variant="outline" className={cn("rounded-full px-3 capitalize", MOOD_STYLE[currentMood])}>
-                {currentMood}
-              </Badge>
+
+            {!recording && chunks.length === 0 && (
+              <p style={{ padding: "24px 0", fontSize: 13, color: muted(55) }}>
+                Nothing transcribed yet. Start listening and speak normally — text and a tone
+                reading appear after each pause.
+              </p>
             )}
           </div>
 
-          {(recording || chunks.length > 0) && (
-            <div className="mt-5 flex items-center gap-5 text-xs tabular-nums text-muted-foreground">
-              <span>{fmtElapsed(elapsedMs)}</span>
-              <span className="h-3 w-px bg-border" />
-              <span>{chunks.length} {chunks.length === 1 ? "chunk" : "chunks"}</span>
-              <span className="h-3 w-px bg-border" />
-              <span>{wordCount} {wordCount === 1 ? "word" : "words"}</span>
+          {chunks.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, paddingTop: 4 }}>
+              <div style={{
+                display: "flex", alignItems: "baseline", justifyContent: "space-between",
+                gap: 16, flexWrap: "wrap",
+              }}>
+                <h4 style={{ margin: 0 }}>What the pipeline has so far</h4>
+                <a href="/ask" onClick={(e) => { e.preventDefault(); navigate("/ask"); }} style={{ fontSize: 12.5 }}>
+                  Ask about the corpus in Ask →
+                </a>
+              </div>
+
+              <section className="blueprint" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 9 }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                  <span className="kicker-sm" style={{ color: muted(55) }}>Session so far</span>
+                  <span className="mono" style={{ fontSize: 11, color: muted(45) }}>
+                    {done.length} chunks · {words} words
+                  </span>
+                </div>
+                <div className="mono" style={{ display: "flex", gap: 20, fontSize: 11.5, color: muted(60), flexWrap: "wrap" }}>
+                  <span>calm {done.filter((c) => c.mood === "calm").length}</span>
+                  <span>tired {done.filter((c) => c.mood === "tired").length}</span>
+                  <span>stressed {done.filter((c) => c.mood === "stressed").length}</span>
+                </div>
+                <span style={{ fontSize: 12, color: muted(55) }}>
+                  A live session is transcript and tone only. Nothing here invents an identity
+                  for a voice it cannot place.
+                </span>
+              </section>
+
+              {flagged && (
+                <section className="blueprint" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 9 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                    <span className="kicker-sm" style={{ color: muted(55) }}>Flagged moment</span>
+                    <span className="mono" style={{ fontSize: 11, color: muted(45) }}>
+                      {fmtElapsed(flagged.t)} · this session
+                    </span>
+                  </div>
+                  <p style={{
+                    margin: 0, fontSize: 15, lineHeight: 1.6,
+                    borderLeft: "2px solid var(--color-divider)", paddingLeft: 12,
+                  }}>
+                    {flagged.text}
+                  </p>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span className="tag mono" style={{ border: `1px solid ${RED}`, color: RED }}>
+                      voice · stressed
+                    </span>
+                    <span className="tag tag-neutral mono" style={{ border: "1px solid var(--color-neutral-300)" }}>
+                      text · not scored live
+                    </span>
+                    <span style={{ fontSize: 12, color: muted(55) }}>
+                      The tone read is acoustic only; text sentiment is scored when a clip is processed.
+                    </span>
+                  </div>
+                </section>
+              )}
             </div>
           )}
         </div>
 
-        {chunks.length === 0 && !recording ? (
-          <div className="mt-10 flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border py-16 text-center animate-fade-in">
-            <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-              <AudioLines className="size-6 text-muted-foreground" />
+        <aside style={{ display: "flex", flexDirection: "column", gap: 16, position: "sticky", top: 26 }}>
+          <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 9 }}>
+            <span className="kicker-sm" style={{ color: muted(55) }}>Input</span>
+            <div className="mono" style={{
+              display: "flex", justifyContent: "space-between", fontSize: 11.5, color: muted(60),
+            }}>
+              <span>default microphone</span>
+              <span>{recording ? (speaking ? "speech" : "silence") : "idle"}</span>
             </div>
-            <div className="space-y-1">
-              <p className="font-medium">Nothing transcribed yet</p>
-              <p className="max-w-xs text-sm text-muted-foreground">
-                Start listening and speak naturally — text and a stress read appear after each pause.
-              </p>
+            <div style={{ height: 8, background: muted(10), position: "relative" }}>
+              <span ref={levelRef} style={{ display: "block", width: 0, height: "100%", background: "var(--color-accent)" }} />
+              <div style={{
+                position: "absolute", left: "88%", top: -3, bottom: -3, width: 1, background: RED,
+              }} />
+            </div>
+            <span style={{ fontSize: 11.5, color: muted(55) }}>
+              Chunks close at natural pauses, not on a timer, so lines do not split mid-sentence.
+            </span>
+          </div>
+
+          <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 10 }}>
+            <span className="kicker-sm" style={{ color: muted(55) }}>Tone across the session</span>
+            <div style={{ display: "flex", gap: 2, height: 34, alignItems: "flex-end" }}>
+              {done.length === 0 && <span style={{ fontSize: 12, color: muted(45) }}>nothing scored yet</span>}
+              {done.map((c) => (
+                <div key={c.seq} title={c.mood || "unscored"} style={{
+                  flex: 1,
+                  height: c.mood === "stressed" ? 30 : c.mood === "tired" ? 22 : 14,
+                  background: MOOD_COLOR[c.mood || ""] || muted(20),
+                }} />
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 12, fontSize: 11.5, color: muted(58) }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <span style={{ width: 9, height: 9, background: GREEN }} />calm
+              </span>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <span style={{ width: 9, height: 9, background: AMBER }} />tired
+              </span>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <span style={{ width: 9, height: 9, background: RED }} />stressed
+              </span>
             </div>
           </div>
-        ) : (
-          <>
-            <div className="mt-8 animate-slide-up rounded-xl border border-border bg-card p-5">
-              {doneChunks.length > 0 && (
-                <div className="mb-4 flex items-center gap-1">
-                  {chunks.map((c) => (
-                    <span
-                      key={c.seq}
-                      title={c.mood ? `chunk ${c.seq}: ${c.mood}` : `chunk ${c.seq}`}
-                      className={cn("h-1.5 flex-1 rounded-full transition-colors", c.mood ? moodDot(c.mood) : "bg-muted")}
-                    />
-                  ))}
+
+          <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 8 }}>
+            <span className="kicker-sm" style={{ color: muted(55) }}>Where this session runs</span>
+            {TOOLS.map(([name, scope]) => {
+              const tone = scope === "local" ? tagTone("accent") : tagTone("warn");
+              return (
+                <div key={name} className="mono" style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  gap: 8, fontSize: 11.5,
+                }}>
+                  <span>{name}</span>
+                  <span className="tag" style={{
+                    border: `1px solid ${tone.border}`, color: tone.color, fontSize: 10,
+                  }}>
+                    {scope}
+                  </span>
                 </div>
-              )}
+              );
+            })}
+            <span style={{ fontSize: 11, lineHeight: 1.5, color: muted(50), marginTop: 2 }}>
+              Everything in a live session stays local. Only Ask sends anything off-box, and
+              only to compose an answer.
+            </span>
+          </div>
 
-              <p className="mb-2 text-xs font-medium text-muted-foreground">Live transcript</p>
-              <p className="whitespace-pre-wrap text-lg leading-relaxed">
-                {transcript || <span className="text-muted-foreground">Listening…</span>}
-                {pendingCount > 0 && <span className="animate-pulse text-muted-foreground"> …</span>}
-              </p>
-            </div>
-
-            {chunks.length > 0 && (
-              <div className="mt-4 animate-slide-up space-y-1.5">
-                {[...chunks].reverse().map((c) => (
-                  <div
-                    key={c.seq}
-                    className="flex items-start gap-3 rounded-lg border border-transparent px-3 py-2 text-sm transition-colors hover:border-border hover:bg-white/[0.02]"
-                  >
-                    <span className="mt-1 w-10 shrink-0 tabular-nums text-xs text-muted-foreground">
-                      {fmtElapsed(c.t)}
-                    </span>
-                    <span className={cn(
-                      "mt-1.5 size-1.5 shrink-0 rounded-full",
-                      c.status === "pending" && "bg-warning animate-pulse",
-                      c.status === "done" && "bg-success",
-                      c.status === "error" && "bg-destructive"
-                    )} />
-                    <span className="flex-1 space-y-1 text-foreground/90">
-                      {c.status === "pending" && <span className="text-muted-foreground">transcribing…</span>}
-                      {c.status === "error" && <span className="text-destructive">failed to transcribe</span>}
-                      {c.status === "done" &&
-                        (c.text || <span className="text-muted-foreground">(no speech detected)</span>)}
-                    </span>
-                    {c.mood && c.status === "done" && (
-                      <Badge variant="outline" className={cn("shrink-0 rounded-full px-2 py-0 text-[11px] capitalize", MOOD_STYLE[c.mood])}>
-                        {c.mood}
-                      </Badge>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
+          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.5, color: muted(50) }}>
+            Tone labels are heuristic readings of the audio, not measurements of how anyone felt.
+          </p>
+          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.5, color: AMBER_INK }}>
+            Live chunks are transcribed only. Speaker identification needs a full clip.
+          </p>
+        </aside>
       </div>
     </div>
   );

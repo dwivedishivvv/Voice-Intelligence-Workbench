@@ -1,36 +1,37 @@
-import { useEffect, useRef, useState } from "react";
-import { speakerColor } from "@/lib/speaker-color";
-import { cn } from "@/lib/utils";
-import { Play, Pause, Volume2, VolumeX } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { fmtTime, muted, outcomeOf, OUTCOME, voiceColor, type Outcome } from "@/lib/ui";
 
-type Turn = { start_s: number; end_s: number; local_label: string; is_overlap: boolean };
-type Speaker = { local_label: string; display_name?: string | null };
+type Turn = { start_s: number; end_s: number; local_label: string; is_overlap?: boolean };
+type Speaker = {
+  local_label: string; display_name?: string | null;
+  match_result?: string | null; talk_share?: number | null;
+};
 
-const RATES = [0.75, 1, 1.25, 1.5, 2];
+const BARS = 96;
 
-function fmtTime(s: number) {
-  if (!Number.isFinite(s)) return "0:00";
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${m}:${sec.toString().padStart(2, "0")}`;
-}
+/** Bar heights are a deterministic decorative envelope, not a waveform read off the file —
+ *  the API serves audio, not peak data. Colour and position ARE real: each bar is coloured
+ *  by the speaker turn that covers its slice of the timeline, and hatched where the
+ *  pipeline declined to judge, so the picture never claims more than the pipeline knows. */
+const HEIGHTS = Array.from({ length: BARS }, (_, i) =>
+  Math.round(18 + Math.abs(Math.sin(i * 1.7) * 46) + (i % 3) * 6));
 
 export function AudioPlayer({
-  src, duration: durationHint, turns = [], speakers = [], onTimeUpdate, seekTo,
+  src, duration: durationHint, turns = [], speakers = [], onTimeUpdate, seekTo, right,
 }: {
-  src: string; duration?: number; turns?: Turn[]; speakers?: Speaker[];
+  src: string;
+  duration?: number;
+  turns?: Turn[];
+  speakers?: Speaker[];
   onTimeUpdate?: (t: number) => void;
   seekTo?: { time: number; nonce: number } | null;
+  right?: React.ReactNode;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const trackRef = useRef<HTMLDivElement>(null);
+  const waveRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
-  const [rate, setRate] = useState(1);
-  const [muted, setMuted] = useState(false);
-  const [scrubbing, setScrubbing] = useState(false);
-  // durationHint (e.g. clip.duration_s from the API) avoids a "0:00" flash before the
-  // <audio> element itself finishes loading metadata — once it has, its real value wins.
+  // durationHint (clip.duration_s) avoids a 00:00 flash before <audio> loads its metadata.
   const [loadedDuration, setLoadedDuration] = useState(0);
   const duration = loadedDuration || durationHint || 0;
 
@@ -41,133 +42,124 @@ export function AudioPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seekTo?.nonce]);
 
+  const outcomeOfLabel = useMemo(() => {
+    const m = new Map<string, Outcome>();
+    for (const s of speakers) m.set(s.local_label, outcomeOf(s.match_result));
+    return m;
+  }, [speakers]);
+
+  const bars = useMemo(() => {
+    return HEIGHTS.map((h, i) => {
+      const t = duration ? ((i + 0.5) / BARS) * duration : 0;
+      const turn = turns.find((x) => t >= x.start_s && t < x.end_s);
+      if (!turn) return { h, color: muted(12), hatch: false };
+      const judged = outcomeOfLabel.get(turn.local_label) !== "abstained";
+      return {
+        h,
+        color: judged ? voiceColor(turn.local_label) : muted(18),
+        hatch: !judged,
+      };
+    });
+  }, [turns, duration, outcomeOfLabel]);
+
   function seekFromClientX(clientX: number) {
-    const el = trackRef.current;
-    const audio = audioRef.current;
+    const el = waveRef.current, audio = audioRef.current;
     if (!el || !audio || !duration) return;
     const rect = el.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    const t = frac * duration;
-    audio.currentTime = t;
-    setCurrent(t);
+    audio.currentTime = frac * duration;
+    setCurrent(frac * duration);
+    onTimeUpdate?.(frac * duration);
   }
 
-  const displayName = (label: string) => speakers.find((s) => s.local_label === label)?.display_name || label;
+  const playedPct = duration ? (current / duration) * 100 : 0;
 
   return (
-    <div className="relative rounded-xl border border-border bg-card p-4">
+    <section className="blueprint" style={{ padding: "16px 18px" }}>
       <audio
         ref={audioRef}
         src={src}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onTimeUpdate={(e) => {
-          if (scrubbing) return;
-          const t = e.currentTarget.currentTime;
-          setCurrent(t);
-          onTimeUpdate?.(t);
-        }}
         onEnded={() => setPlaying(false)}
         onLoadedMetadata={(e) => setLoadedDuration(e.currentTarget.duration)}
-        // Chrome throttles/never loads media data for display:none elements (Tailwind's
-        // `hidden`) — this stays in normal flow but is visually and interactively invisible.
+        onTimeUpdate={(e) => {
+          setCurrent(e.currentTarget.currentTime);
+          onTimeUpdate?.(e.currentTarget.currentTime);
+        }}
+        // Chrome will not load media data for a display:none element; this stays in flow.
         style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
       />
 
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => (playing ? audioRef.current?.pause() : audioRef.current?.play())}
-          className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-transform hover:scale-105 active:scale-95"
-        >
-          {playing ? <Pause className="size-4.5 fill-current" /> : <Play className="ml-0.5 size-4.5 fill-current" />}
-        </button>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: 16, marginBottom: 14,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <button
+            className="btn btn-primary btn-icon"
+            style={{ width: 38, height: 38 }}
+            aria-label={playing ? "Pause" : "Play"}
+            onClick={() => (playing ? audioRef.current?.pause() : audioRef.current?.play())}
+          >
+            {playing ? "▮▮" : "▶"}
+          </button>
+          <span className="mono" style={{ fontSize: 13 }}>
+            {fmtTime(current)} <span style={{ color: muted(45) }}>/ {fmtTime(duration)}</span>
+          </span>
+        </div>
+        {right}
+      </div>
 
-        <div className="flex-1">
+      <div
+        ref={waveRef}
+        onMouseDown={(e) => seekFromClientX(e.clientX)}
+        style={{
+          display: "flex", alignItems: "flex-end", gap: 2, height: 88,
+          position: "relative", cursor: duration ? "pointer" : "default",
+        }}
+      >
+        {bars.map((b, i) => (
           <div
-            ref={trackRef}
-            className="group relative h-11 cursor-pointer select-none rounded-lg bg-muted"
-            onMouseDown={(e) => { setScrubbing(true); seekFromClientX(e.clientX); }}
-            onMouseMove={(e) => { if (e.buttons === 1 && scrubbing) seekFromClientX(e.clientX); }}
-            onMouseUp={(e) => { seekFromClientX(e.clientX); setScrubbing(false); onTimeUpdate?.(audioRef.current?.currentTime || 0); }}
-            onMouseLeave={() => setScrubbing(false)}
-          >
-            {/* speaker segments */}
-            {duration > 0 && turns.map((t, i) => {
-              const color = speakerColor(t.local_label);
-              const left = (t.start_s / duration) * 100;
-              const width = Math.max(0.3, ((t.end_s - t.start_s) / duration) * 100);
-              return (
-                <div
-                  key={i}
-                  title={`${displayName(t.local_label)} · ${fmtTime(t.start_s)}–${fmtTime(t.end_s)}`}
-                  className={cn(
-                    "absolute top-1.5 bottom-1.5 rounded-sm opacity-70 transition-opacity group-hover:opacity-85",
-                    color.dot,
-                    t.is_overlap && "ring-2 ring-warning"
-                  )}
-                  style={{ left: `${left}%`, width: `${width}%` }}
-                />
-              );
-            })}
-
-            {/* played progress overlay */}
-            <div
-              className="pointer-events-none absolute inset-y-0 left-0 rounded-l-lg bg-white/10"
-              style={{ width: `${duration ? (current / duration) * 100 : 0}%` }}
-            />
-
-            {/* playhead */}
-            <div
-              className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.8)]"
-              style={{ left: `${duration ? (current / duration) * 100 : 0}%` }}
-            />
-          </div>
-
-          <div className="mt-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
-            <span>{fmtTime(current)}</span>
-            <span>{fmtTime(duration)}</span>
-          </div>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            onClick={() => setRate((r) => RATES[(RATES.indexOf(r) + 1) % RATES.length])}
-            className="rounded-md px-2 py-1 text-xs font-medium text-muted-foreground tabular-nums hover:bg-accent hover:text-foreground"
-            title="Playback speed"
-          >
-            {rate}x
-          </button>
-          <button
-            onClick={() => setMuted((m) => !m)}
-            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-          >
-            {muted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
-          </button>
-        </div>
+            key={i}
+            className={`wf-seg${b.hatch ? " hatch" : ""}`}
+            style={{
+              flex: 1, height: b.h, background: b.hatch ? "transparent" : b.color,
+              borderTop: b.hatch ? `1px solid ${muted(35)}` : undefined,
+            }}
+          />
+        ))}
+        <div style={{
+          position: "absolute", left: `${playedPct}%`, top: -6, bottom: -6,
+          width: 1, background: "var(--color-text)", pointerEvents: "none",
+        }} />
       </div>
 
       {speakers.length > 0 && (
-        <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-border pt-3">
-          {speakers.map((s) => (
-            <div key={s.local_label} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className={cn("size-2 rounded-full", speakerColor(s.local_label).dot)} />
-              {s.display_name || s.local_label}
-            </div>
-          ))}
+        <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", fontSize: 12 }}>
+          {speakers.map((s) => {
+            const outcome = outcomeOf(s.match_result);
+            return (
+              <span key={s.local_label} style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <span style={{ width: 11, height: 11, background: voiceColor(s.local_label) }} />
+                <span style={{ fontStyle: OUTCOME[outcome].italic ? "italic" : "normal" }}>
+                  {s.display_name || s.local_label}{outcome === "suggested" ? "?" : ""}
+                </span>
+                <span className="mono" style={{ color: muted(45) }}>
+                  {s.talk_share != null ? `${Math.round(s.talk_share * 100)}%` : ""}
+                </span>
+              </span>
+            );
+          })}
+          {speakers.some((s) => outcomeOf(s.match_result) === "abstained") && (
+            <span style={{ display: "flex", alignItems: "center", gap: 7, marginLeft: "auto" }}>
+              <span className="hatch" style={{ width: 11, height: 11, border: `1px solid ${muted(35)}` }} />
+              <span style={{ color: muted(60) }}>not judged</span>
+            </span>
+          )}
         </div>
       )}
-
-      {/* keep native element's rate/mute in sync without re-render churn */}
-      <RateSync audioRef={audioRef} rate={rate} muted={muted} />
-    </div>
+    </section>
   );
-}
-
-function RateSync({ audioRef, rate, muted }: {
-  audioRef: React.RefObject<HTMLAudioElement>; rate: number; muted: boolean;
-}) {
-  useEffect(() => { if (audioRef.current) audioRef.current.playbackRate = rate; }, [rate, audioRef]);
-  useEffect(() => { if (audioRef.current) audioRef.current.muted = muted; }, [muted, audioRef]);
-  return null;
 }
