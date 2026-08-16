@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePeaks } from "@/lib/peaks";
 import { fmtTime, muted, outcomeOf, OUTCOME, voiceColor, type Outcome } from "@/lib/ui";
 
 type Turn = { start_s: number; end_s: number; local_label: string; is_overlap?: boolean };
@@ -8,13 +9,10 @@ type Speaker = {
 };
 
 const BARS = 96;
-
-/** Bar heights are a deterministic decorative envelope, not a waveform read off the file —
- *  the API serves audio, not peak data. Colour and position ARE real: each bar is coloured
- *  by the speaker turn that covers its slice of the timeline, and hatched where the
- *  pipeline declined to judge, so the picture never claims more than the pipeline knows. */
-const HEIGHTS = Array.from({ length: BARS }, (_, i) =>
-  Math.round(18 + Math.abs(Math.sin(i * 1.7) * 46) + (i % 3) * 6));
+const WAVE_H = 88;
+/** Until the peaks are decoded — and if they never are — every bar sits at this height:
+ *  a flat row that plainly reads as "not measured yet" rather than as a waveform. */
+const FLAT = 3;
 
 export function AudioPlayer({
   src, duration: durationHint, turns = [], speakers = [], onTimeUpdate, seekTo, right,
@@ -27,6 +25,9 @@ export function AudioPlayer({
   seekTo?: { time: number; nonce: number } | null;
   right?: React.ReactNode;
 }) {
+  // The bars are the file's own peak envelope; colour and position stay what they were —
+  // the speaker turn covering that slice, hatched where the pipeline declined to judge.
+  const { peaks, status } = usePeaks(src, BARS);
   const audioRef = useRef<HTMLAudioElement>(null);
   const waveRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -49,7 +50,8 @@ export function AudioPlayer({
   }, [speakers]);
 
   const bars = useMemo(() => {
-    return HEIGHTS.map((h, i) => {
+    return Array.from({ length: BARS }, (_, i) => {
+      const h = peaks ? Math.max(FLAT, Math.round(peaks[i] * (WAVE_H - 6))) : FLAT;
       const t = duration ? ((i + 0.5) / BARS) * duration : 0;
       const turn = turns.find((x) => t >= x.start_s && t < x.end_s);
       if (!turn) return { h, color: muted(12), hatch: false };
@@ -60,7 +62,7 @@ export function AudioPlayer({
         hatch: !judged,
       };
     });
-  }, [turns, duration, outcomeOfLabel]);
+  }, [peaks, turns, duration, outcomeOfLabel]);
 
   function seekFromClientX(clientX: number) {
     const el = waveRef.current, audio = audioRef.current;
@@ -116,7 +118,7 @@ export function AudioPlayer({
         ref={waveRef}
         onMouseDown={(e) => seekFromClientX(e.clientX)}
         style={{
-          display: "flex", alignItems: "flex-end", gap: 2, height: 88,
+          display: "flex", alignItems: "flex-end", gap: 2, height: WAVE_H,
           position: "relative", cursor: duration ? "pointer" : "default",
         }}
       >
@@ -138,6 +140,14 @@ export function AudioPlayer({
           width: 1, background: "var(--color-text)", pointerEvents: "none",
         }} />
       </div>
+
+      {status !== "ready" && (
+        <div className="mono" style={{ marginTop: 8, fontSize: 11, color: muted(50) }}>
+          {status === "loading"
+            ? "READING WAVEFORM…"
+            : "WAVEFORM UNAVAILABLE — HEIGHTS NOT MEASURED"}
+        </div>
+      )}
 
       {speakers.length > 0 && (
         <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", fontSize: 12 }}>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/api/client";
 import { Dialog } from "@/components/dialog";
+import { audioPeaks } from "@/lib/peaks";
 import { AMBER, GREEN, RED, fmtSpeech, muted, num, tagTone } from "@/lib/ui";
 
 type Profile = {
@@ -13,15 +14,24 @@ type Cluster = {
   total_speech_s: number | null; intra_cohesion: number | null;
 };
 
-/** Montage bars are a deterministic decorative envelope keyed off the cluster id — the
- *  montage endpoint serves audio, not peak data. Listening is the real audition; this is
- *  just something to press play on. */
-const montageBars = (seed: string) => {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  return Array.from({ length: 40 }, (_, i) =>
-    Math.round(6 + Math.abs(Math.sin((i + (h % 17)) * 1.3)) * 20));
-};
+const MONTAGE_BARS = 40;
+
+/** The envelope of the montage itself — but only once we hold the audio. Stitching a
+ *  montage is expensive, so nothing is fetched until you press play; until then (and if
+ *  the decode fails) the strip rests flat rather than drawing a shape nobody measured. */
+function MontageBars({ peaks, active }: { peaks?: number[]; active: boolean }) {
+  return (
+    <>
+      {Array.from({ length: MONTAGE_BARS }, (_, i) => (
+        <div key={i} style={{
+          flex: 1, minWidth: 2,
+          height: peaks ? Math.max(2, Math.round(peaks[i] * 24)) : 2,
+          background: active ? "var(--color-accent)" : "var(--color-accent-400)",
+        }} />
+      ))}
+    </>
+  );
+}
 
 /** Clusters are stored with a placeholder label until someone names them, so fall back to
  *  the id — "Voice 9a2f" is at least a handle you can tell apart from the next one. */
@@ -48,6 +58,7 @@ export default function Speakers() {
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [info, setInfo] = useState<Record<string, { segments: number; seconds: number; clips: number }>>({});
+  const [peaks, setPeaks] = useState<Record<string, number[]>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   async function load() {
@@ -83,7 +94,12 @@ export default function Speakers() {
         seconds: Number(res.headers.get("X-Montage-Seconds") || 0),
         clips: Number(res.headers.get("X-Montage-Clips") || 0),
       } }));
-      const url = URL.createObjectURL(await res.blob());
+      const blob = await res.blob();
+      // decoded off the same blob we are about to play, so the bars can't disagree with it
+      audioPeaks(blob, MONTAGE_BARS)
+        .then((p) => setPeaks((m) => ({ ...m, [id]: p })))
+        .catch(() => {}); // an undecodable montage still plays; the strip just stays flat
+      const url = URL.createObjectURL(blob);
       const el = new Audio(url);
       el.onended = () => { URL.revokeObjectURL(url); setPlayingId(null); };
       el.onerror = () => { toast.error("Could not play that montage"); setPlayingId(null); };
@@ -234,13 +250,9 @@ export default function Speakers() {
                           aria-label="Play montage">
                     {loadingId === c.id ? "…" : playingId === c.id ? "■" : "▶"}
                   </button>
-                  <div style={{ display: "flex", alignItems: "flex-end", gap: 1, height: 26, width: 230, flex: "none" }}>
-                    {montageBars(c.id).map((h, i) => (
-                      <div key={i} style={{
-                        flex: 1, minWidth: 2, height: h,
-                        background: playingId === c.id ? "var(--color-accent)" : "var(--color-accent-400)",
-                      }} />
-                    ))}
+                  <div title={peaks[c.id] ? "Peaks read from the montage" : "Press play to read the montage's peaks"}
+                       style={{ display: "flex", alignItems: "flex-end", gap: 1, height: 26, width: 230, flex: "none" }}>
+                    <MontageBars peaks={peaks[c.id]} active={playingId === c.id} />
                   </div>
                   {info[c.id] && (
                     <span className="mono" style={{ fontSize: 11, color: muted(50), whiteSpace: "nowrap" }}>
@@ -312,9 +324,8 @@ export default function Speakers() {
                 {playingId === promote?.id ? "■" : "▶"}
               </button>
               <div style={{ display: "flex", alignItems: "flex-end", gap: 1, height: 26, flex: 1 }}>
-                {montageBars(promote?.id || "").map((h, i) => (
-                  <div key={i} style={{ flex: 1, minWidth: 2, height: h, background: "var(--color-accent-400)" }} />
-                ))}
+                <MontageBars peaks={promote ? peaks[promote.id] : undefined}
+                             active={playingId === promote?.id} />
               </div>
               <span className="mono" style={{ fontSize: 11, color: muted(55), flex: "none" }}>
                 montage · {fmtSpeech(promote?.total_speech_s)}
