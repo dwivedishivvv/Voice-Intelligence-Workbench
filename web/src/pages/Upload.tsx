@@ -7,9 +7,24 @@ import { AMBER, AMBER_INK, muted, tagTone } from "@/lib/ui";
 
 type Outcome = "QUEUED" | "PROCESSING" | "COMPLETE" | "REJECTED" | "FAILED" | "DUPLICATE";
 type Item = {
-  key: string; file: File; clipId: string | null; stage: string; pct: number;
-  outcome: Outcome; voices: number | null; code: string | null; message: string | null;
+  key: string; name: string; size: number; clipId: string | null;
+  stage: string; pct: number; outcome: Outcome;
+  voices: number | null; code: string | null; message: string | null;
+  // Held only for a file that has not been sent yet. A File handle cannot be serialised,
+  // so it is the one part of a batch that a refresh genuinely destroys.
+  file?: File;
 };
+
+const STORE = "upload_batch";
+const TERMINAL: Outcome[] = ["COMPLETE", "REJECTED", "FAILED", "DUPLICATE"];
+
+/** A batch outlives the page. Processing happens on the box and takes minutes, so a
+ *  refresh — or a closed laptop — must not lose the record of what was submitted.
+ *
+ *  Only what the API already knows is persisted: once a file has a clip id, its progress
+ *  can be recovered by asking. A file still waiting to be sent cannot be, because its File
+ *  handle dies with the page, so those are dropped on restore and said so out loud rather
+ *  than restored as rows that would never move. */
 
 const OUTCOME_TONE: Record<Outcome, ReturnType<typeof tagTone>> = {
   COMPLETE: tagTone("accent"), PROCESSING: tagTone("neutral"), QUEUED: tagTone("neutral"),
@@ -24,9 +39,28 @@ const BAR_COLOR: Record<Outcome, string> = {
 
 const CONCURRENCY = 3;
 
+/** What a clip row says about itself, in the shape the table renders. Used when catching
+ *  up after a refresh, where the stage-level events are long gone and the clip's own
+ *  status is all that is left. */
+function statusOf(clip: {
+  status: string; n_speakers: number | null; error_code: string | null;
+}): Partial<Item> {
+  const terminal = TERMINAL.includes(clip.status as Outcome);
+  return {
+    outcome: (terminal ? clip.status : "PROCESSING") as Outcome,
+    stage: clip.status.toLowerCase(),
+    pct: terminal ? 100 : 50,
+    voices: clip.n_speakers,
+    code: clip.error_code,
+  };
+}
+
 export default function Upload() {
   const navigate = useNavigate();
   const [items, setItems] = useState<Item[]>([]);
+  // Nothing is written back to storage until the first read has happened, or the empty
+  // initial state would erase the batch before it is restored.
+  const [restoring, setRestoring] = useState(true);
   const [dragging, setDragging] = useState(false);
   const [races, setRaces] = useState<any[]>([]);
   const [raceId, setRaceId] = useState("");
@@ -36,11 +70,76 @@ export default function Upload() {
   const inputRef = useRef<HTMLInputElement>(null);
   const batchId = useRef(Math.random().toString(16).slice(2, 6));
 
-  useEffect(() => { api.listRaces().then((r) => setRaces(r.items)).catch(() => {}); }, []);
-
   const patch = useCallback((key: string, p: Partial<Item>) => {
     setItems((prev) => prev.map((i) => (i.key === key ? { ...i, ...p } : i)));
   }, []);
+
+  useEffect(() => { api.listRaces().then((r) => setRaces(r.items)).catch(() => {}); }, []);
+
+  // Persist on every change. The File is stripped: it cannot be serialised, and a row that
+  // claims to hold a file it no longer has is worse than an honest gap.
+  useEffect(() => {
+    if (restoring) return;
+    const keep = items.map(({ file, ...rest }) => rest);
+    if (keep.length) localStorage.setItem(STORE, JSON.stringify(keep));
+    else localStorage.removeItem(STORE);
+  }, [items, restoring]);
+
+  // Restore, then reconcile against the API. Redis pub/sub has no replay, so anything that
+  // finished while the page was gone was never delivered — the truth is the clip row, and
+  // asking for it is the only way to catch up.
+  useEffect(() => {
+    let saved: Item[] = [];
+    try { saved = JSON.parse(localStorage.getItem(STORE) || "[]"); } catch { saved = []; }
+
+    const sent = saved.filter((i) => i.clipId);
+    const lost = saved.length - sent.length;
+    setItems(sent);
+    setRestoring(false);
+    if (lost) {
+      toast.info(`${lost} file${lost === 1 ? "" : "s"} never left the browser`, {
+        description: "A queued file cannot survive a refresh — drop those in again.",
+      });
+    }
+
+    let alive = true;
+    (async () => {
+      for (const item of sent) {
+        if (TERMINAL.includes(item.outcome)) continue;
+        try {
+          const clip = await api.getClip(item.clipId!);
+          if (!alive) return;
+          patch(item.key, statusOf(clip));
+        } catch {
+          // A clip the API no longer has was deleted while we were away; say so rather
+          // than leaving the row spinning on a job that will never report.
+          if (alive) patch(item.key, {
+            outcome: "FAILED", pct: 100, stage: "clip no longer exists",
+            message: "This clip was deleted after it was uploaded.",
+          });
+        }
+      }
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Poll whatever is still in flight. The websocket carries stage-level progress for a
+  // batch this page started; after a refresh there is no socket, and a clip that finishes
+  // must still stop saying "processing".
+  useEffect(() => {
+    const watching = items.filter((i) => i.clipId && !TERMINAL.includes(i.outcome));
+    if (!watching.length) return;
+    const t = setInterval(async () => {
+      for (const item of watching) {
+        try {
+          patch(item.key, statusOf(await api.getClip(item.clipId!)));
+        } catch { /* transient — the next tick tries again */ }
+      }
+    }, 4000);
+    return () => clearInterval(t);
+  }, [items, patch]);
+
 
   function addFiles(files: File[]) {
     const audio = files.filter((f) =>
@@ -49,6 +148,7 @@ export default function Upload() {
     if (!audio.length) return toast.error("No audio or video files in that drop");
     setItems((prev) => [...prev, ...audio.map((file) => ({
       key: `${file.name}-${file.size}-${Math.random().toString(16).slice(2)}`,
+      name: file.name, size: file.size,
       file, clipId: null, stage: "waiting", pct: 0,
       outcome: "QUEUED" as Outcome, voices: null, code: null, message: null,
     }))]);
@@ -60,8 +160,8 @@ export default function Upload() {
     return new Promise<void>(async (resolve) => {
       try {
         const res = raceId
-          ? await api.uploadRaceClip(raceId, item.file)
-          : await api.uploadClip(item.file);
+          ? await api.uploadRaceClip(raceId, item.file!)
+          : await api.uploadClip(item.file!);
         patch(item.key, { clipId: res.clip_id });
         if (res.duplicate) {
           patch(item.key, {
@@ -104,7 +204,7 @@ export default function Upload() {
   }
 
   async function runBatch() {
-    const queue = items.filter((i) => i.outcome === "QUEUED");
+    const queue = items.filter((i) => i.outcome === "QUEUED" && i.file);
     if (!queue.length) return;
     setRunning(true);
     setBatchStart(new Date());
@@ -147,7 +247,7 @@ export default function Upload() {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-secondary" disabled={!items.length || running}
-                  onClick={() => setItems([])}>
+                  onClick={() => { setItems([]); localStorage.removeItem(STORE); }}>
             Clear batch
           </button>
           <button className="btn btn-primary" onClick={() => navigate("/")}>Open in Library</button>
@@ -255,9 +355,9 @@ export default function Upload() {
                 const tone = OUTCOME_TONE[i.outcome];
                 return (
                   <tr key={i.key}>
-                    <td className="mono" style={{ fontSize: 12.5 }}>{i.file.name}</td>
+                    <td className="mono" style={{ fontSize: 12.5 }}>{i.name}</td>
                     <td className="mono" style={{ fontSize: 12.5, color: muted(60) }}>
-                      {(i.file.size / 1024 / 1024).toFixed(1)} MB
+                      {(i.size / 1024 / 1024).toFixed(1)} MB
                     </td>
                     <td>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -305,7 +405,7 @@ export default function Upload() {
         onClose={() => setReject(null)}
         kicker="Upload · batch"
         title="Why this file was rejected"
-        subject={reject ? `${reject.file.name} · ${(reject.file.size / 1024 / 1024).toFixed(1)} MB` : ""}
+        subject={reject ? `${reject.name} · ${(reject.size / 1024 / 1024).toFixed(1)} MB` : ""}
         cancel="Close"
         width="560px"
       >
