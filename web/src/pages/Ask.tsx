@@ -42,10 +42,13 @@ const TOOL_LABEL: Record<string, string> = {
   compare_speakers: "compared speakers",
 };
 
+/** Questions the agent's tools can actually answer. Its search is over what was *said* —
+ *  tone and identification outcomes are columns, not words, and no tool reads them, so a
+ *  "who sounds stressed" example would only teach the user that Ask is broken. */
 const EXAMPLES = [
-  "Which radio calls sound stressed, and what was happening?",
-  "Where do the text and voice readings disagree?",
-  "Find anything about tyre wear and who said it",
+  "What was said about tyre wear, and who said it?",
+  "Find the radio calls about pit stops",
+  "What did anyone say about the car balance?",
 ];
 
 const fmtAt = (s: number | null) =>
@@ -458,9 +461,13 @@ export default function Ask() {
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <span className="kicker">Ask the corpus</span>
               <p style={{ margin: 0, fontSize: 16, lineHeight: 1.6, color: muted(72), maxWidth: "58ch" }}>
-                Retrieval runs on the box; only the final wording is composed off-box, and every
-                claim comes back with the clip it came from.
+                Ask about what was said. Retrieval runs on the box; only the final wording is
+                composed off-box, and every claim comes back with the clip it came from.
               </p>
+              <span style={{ fontSize: 12.5, color: muted(55), maxWidth: "58ch" }}>
+                Tone and identification outcomes are not searchable here — those live on the
+                clip pages and the review queue.
+              </span>
             </div>
             {composer}
             <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 4 }}>
