@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from common.config import get_effective_settings
+from common.config import get_effective_settings, get_settings
 from common import db, storage, audit as audit_mod, speaker as sc
 from ..auth import get_current_user
 from ..services import ingest
@@ -373,10 +373,33 @@ async def name_race_voice(race_id: str, cluster_id: str, body: NameVoiceBody,
 
 
 @router.delete("/{race_id}")
-async def delete_race(race_id: str, user=Depends(get_current_user)):
+async def delete_race(race_id: str, delete_clips: bool = False, user=Depends(get_current_user)):
+    """Delete a race, and optionally everything filed under it.
+
+    Two genuinely different intentions, so the destructive one has to be asked for by name.
+    By default clips.race_id is ON DELETE SET NULL: the recordings and their transcripts
+    stay in the library and merely stop belonging to this race.
+
+    With delete_clips, each recording goes through the same path as DELETE /v1/clips/{id} —
+    files off disk, row deleted, deletion receipt written — rather than a bulk DELETE that
+    would leave the audio orphaned on disk with nothing left pointing at it.
+    """
+    cfg = get_settings()
     await _get_race(race_id)
-    # clips.race_id is ON DELETE SET NULL — the recordings and their transcripts stay in
-    # the library, they just stop belonging to this race. Deleting audio is /v1/clips' job.
+
+    deleted = 0
+    if delete_clips:
+        rows = await db.fetch("SELECT id, sha256 FROM clips WHERE race_id=$1", race_id)
+        for row in rows:
+            storage.delete_clip_files(cfg, str(row["id"]))
+            await db.execute("DELETE FROM clips WHERE id=$1", row["id"])
+            await db.insert("deletion_receipts", {
+                "object_type": "clip", "object_id": str(row["id"]),
+                "sha256": row["sha256"], "reason": "race_deleted",
+            })
+        deleted = len(rows)
+
     await db.execute("DELETE FROM races WHERE id=$1", race_id)
-    await audit_mod.audit("race.delete", "race", race_id, actor=user)
-    return {"ok": True}
+    await audit_mod.audit("race.delete", "race", race_id, actor=user,
+                           after={"clips_deleted": deleted})
+    return {"ok": True, "clips_deleted": deleted}

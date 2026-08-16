@@ -115,7 +115,11 @@ export const api = {
   getRace: (id: string) => req(`/v1/races/${id}`),
   raceUtterances: (id: string) => req(`/v1/races/${id}/utterances`),
   raceStats: (id: string) => req(`/v1/races/${id}/stats`),
-  deleteRace: (id: string) => req(`/v1/races/${id}`, { method: "DELETE" }),
+  // Without deleteClips the recordings survive, unfiled — the race is only a grouping.
+  // With it, each one goes through the same delete path as a single clip: files off disk,
+  // row gone, deletion receipt written.
+  deleteRace: (id: string, deleteClips = false) =>
+    req(`/v1/races/${id}?delete_clips=${deleteClips}`, { method: "DELETE" }),
   createRace: (fields: Record<string, string>, svg: File | null) => {
     const fd = new FormData();
     for (const [k, v] of Object.entries(fields)) fd.append(k, v);

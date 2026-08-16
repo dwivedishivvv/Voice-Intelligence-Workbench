@@ -142,6 +142,7 @@ function RaceList() {
   const [totalClips, setTotalClips] = useState(0);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<Race | null>(null);
+  const [alsoClips, setAlsoClips] = useState(false);
 
   const load = useCallback(() => {
     api.listRaces().then((r) => setRaces(r.items)).catch((e) => toast.error(String(e.message)));
@@ -281,29 +282,63 @@ function RaceList() {
 
       <Dialog
         open={deleting != null}
-        onClose={() => setDeleting(null)}
+        onClose={() => { setDeleting(null); setAlsoClips(false); }}
         kicker="Races · destructive"
         title="Delete this race?"
         subject={deleting ? `${deleting.name} · ${deleting.n_clips ?? 0} recordings` : ""}
-        consequence="The grouping goes; the recordings stay in the library, unfiled."
-        confirm="Delete race"
+        consequence={alsoClips
+          ? "Not reversible. The audio is removed from disk and every transcript, voice and tone reading with it."
+          : "The grouping goes; the recordings stay in the library, unfiled."}
+        confirm={alsoClips
+          ? `Delete race and ${deleting?.n_clips ?? 0} recording${deleting?.n_clips === 1 ? "" : "s"}`
+          : "Delete race only"}
         cancel="Keep race"
         danger
-        width="470px"
+        width="560px"
         onConfirm={async () => {
           if (!deleting) return;
           try {
-            await api.deleteRace(deleting.id);
-            toast.success("Race deleted — its recordings stay in the library");
+            const res = await api.deleteRace(deleting.id, alsoClips);
+            toast.success(res.clips_deleted
+              ? `Race and ${res.clips_deleted} recording${res.clips_deleted === 1 ? "" : "s"} deleted`
+              : "Race deleted — its recordings stay in the library");
             setDeleting(null);
+            setAlsoClips(false);
             load();
           } catch (e) { toast.error(String((e as Error).message)); }
         }}
       >
-        <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6 }}>
-          Deleting a race unmakes the grouping only. Every transcript, voice and tone reading
-          survives, and the recordings reappear in the library with no race attached.
-        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6 }}>
+            A race is a grouping. Deleting it unmakes the grouping only: every transcript,
+            voice and tone reading survives, and the {deleting?.n_clips ?? 0} recordings
+            reappear in the library with no race attached.
+          </p>
+          {/* The destructive reading of "delete this race" has to be asked for by name.
+              Defaulting to it would make an ordinary tidy-up destroy the audio. */}
+          <label style={{
+            display: "flex", alignItems: "flex-start", gap: 9, fontSize: 13.5,
+            cursor: "pointer", padding: 12,
+            border: `1px solid ${alsoClips ? RED : "var(--color-divider)"}`,
+          }}>
+            <input type="checkbox" checked={alsoClips} style={{ marginTop: 2 }}
+                   onChange={(e) => setAlsoClips(e.target.checked)} />
+            <span>
+              Delete the {deleting?.n_clips ?? 0} recording{deleting?.n_clips === 1 ? "" : "s"} too
+              <span style={{ display: "block", color: muted(60), fontSize: 12.5, marginTop: 3 }}>
+                Audio off disk, transcripts and tone readings gone, and any profile enrolled
+                from them loses that enrollment. A deletion receipt is written for each.
+                Not reversible.
+              </span>
+            </span>
+          </label>
+          {alsoClips && (deleting?.n_clips ?? 0) > 0 && (
+            <span className="mono" style={{ fontSize: 11.5, color: RED }}>
+              {deleting?.n_clips} clips will be removed from the corpus, and any Ask answer
+              citing them will show its citation as deleted.
+            </span>
+          )}
+        </div>
       </Dialog>
     </div>
   );
