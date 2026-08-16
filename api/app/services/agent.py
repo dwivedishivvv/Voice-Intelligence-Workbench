@@ -70,6 +70,27 @@ WHERE p.id = ANY($1::uuid[])
 PLACEHOLDER_ARGS = frozenset({"", "null", "none", "undefined", "nil", "n/a", "na", "-"})
 
 
+# Words that name a tone reading rather than a topic. Models reach for the word before the
+# filter -- "which calls sound stressed" arrives as a text query, which matches nothing,
+# because the tone is a stored label and not something anybody says out loud. Kept to
+# synonyms of the three labels the classifier actually emits: mapping "angry" or "urgent"
+# onto `stressed` would be this layer inventing a category the pipeline does not have.
+TONE_WORDS = {
+    "stressed": "stressed", "stress": "stressed", "stressful": "stressed",
+    "calm": "calm", "relaxed": "calm",
+    "tired": "tired", "fatigued": "tired", "exhausted": "tired",
+}
+
+
+def tone_word(text: str) -> str | None:
+    """The tone reading a query is really asking for, if any. Word-boundary matched so
+    "distressed" does not read as "stressed"."""
+    for word, mood in TONE_WORDS.items():
+        if re.search(rf"\b{word}\b", text, re.I):
+            return mood
+    return None
+
+
 def is_placeholder(value: str | None) -> bool:
     """True when an optional string argument is really absent.
 
@@ -92,30 +113,76 @@ class LLMUnavailable(RuntimeError):
 # never gets called because its description only described itself.
 
 @beta_async_tool
-async def search_speech(query: str, spoken_by: str | None = None, limit: int = 8) -> str:
-    """Find speech in the corpus by topic. Start here for almost any question.
+async def search_speech(query: str = "", spoken_by: str | None = None,
+                        mood: str | None = None, limit: int = 8) -> str:
+    """Find speech in the corpus by topic, by tone, or by both. Start here for almost any
+    question.
 
     Searches both pipeline-processed utterances and F1 team-radio calls. Returns one line
-    per hit: the speech id, who said it, the session and lap where known, and a clipped
-    quote. Call expand_speech on the ids that matter before drawing a conclusion.
+    per hit: the speech id, who said it, the session and lap where known, the tone reading
+    where there is one, and a clipped quote. Call expand_speech on the ids that matter
+    before drawing a conclusion.
 
     Search the TOPIC, not the person. A name in `query` matches speech that *mentions*
     that name, which is usually somebody else talking about them — to find what a person
     said, put the subject in `query` and the person in `spoken_by`.
 
+    Tone is a separate axis from topic, because it is a column rather than words: no
+    amount of searching for "stressed" finds speech whose voice reads stressed. Use
+    `mood` for that, alone to list speech by tone, or with a `query` to combine the two.
+    Every filter composes: query + spoken_by + mood is one search, not three.
+
     Args:
         query: The topic to look for, in natural language — "power failure", "tyre wear".
             Do not put a driver or speaker name here unless you want speech that mentions
-            them.
+            them. Omit it when filtering by tone alone.
         spoken_by: Restrict to one speaker: a driver code ("ALB"), a driver number ("23"),
             or an enrolled speaker's name. Omit to search everyone.
-        limit: How many hits to return. Default 8.
+        mood: Restrict to one tone reading: "calm", "stressed" or "tired". These are
+            heuristic readings of the audio, not measurements of how anyone felt, and with
+            no `query` the results are ordered by recency — the classifier emits a label,
+            not a magnitude, so there is no "most stressed".
+        limit: How many hits to return. Default 8, capped at 25.
     """
+    if is_placeholder(spoken_by):
+        spoken_by = None
+    if is_placeholder(mood):
+        mood = None
+    if mood:
+        mood = mood.strip().lower()
+        if mood not in search_svc.MOODS:
+            return (f'"{mood}" is not a tone reading. The classifier emits only '
+                    f'{", ".join(search_svc.MOODS)} — anything else matches nothing, which '
+                    f"is a bad argument rather than a fact about the corpus.")
+    limit = max(1, min(int(limit or 8), 25))
+    topic = None if is_placeholder(query) else query.strip()
+    if not topic and not mood:
+        return ("Give a topic in `query`, or a tone reading in `mood`, or both. "
+                "An empty search has nothing to rank and nothing to filter.")
+
     # Over-fetch before filtering: the speaker filter is applied after ranking, so asking
     # for exactly `limit` would return almost nothing once a filter is set.
-    anchors = await search_svc.anchor_speech(query, limit=limit * 6 if spoken_by else limit)
+    over = limit * 6 if spoken_by else limit
+    note = ""
+    if topic:
+        anchors = await search_svc.anchor_speech(topic, limit=over, mood=mood)
+        # Recovery, not guesswork: only when the text search found nothing, only when no
+        # tone filter was given, and the reinterpretation is stated in the result so the
+        # model reports what was actually searched rather than what it asked for.
+        if not anchors and not mood and (inferred := tone_word(topic)):
+            anchors = await search_svc.speech_by_mood(inferred, limit=over)
+            mood = inferred
+            note = (f"Nothing in the transcripts mentions {topic!r}. A voice reading is a "
+                    f"stored label, not a word anyone says, so this is speech whose voice "
+                    f"reads {inferred}, most recent first:\n")
+    else:
+        anchors = await search_svc.speech_by_mood(mood, limit=over)
+
     if not anchors:
-        return "No matching speech found."
+        scope = ", ".join(filter(None, [
+            f"topic {topic!r}" if topic else None,
+            f"tone {mood}" if mood else None]))
+        return f"No speech found for {scope}."
     try:
         # One extra graph round trip to attach speaker, session and lap to each hit, reusing
         # expand() rather than adding a second Cypher query for the same edges. The graph
@@ -128,9 +195,6 @@ async def search_speech(query: str, spoken_by: str | None = None, limit: int = 8
         # Graph down or un-synced: degrade to what search alone knows rather than failing
         # the tool. A hit without its speaker is still a hit.
         rows = anchors
-
-    if is_placeholder(spoken_by):
-        spoken_by = None
 
     if spoken_by:
         want = spoken_by.strip().lower()
@@ -148,29 +212,48 @@ async def search_speech(query: str, spoken_by: str | None = None, limit: int = 8
 
         rows = [r for r in rows if is_match(r)]
         if not rows:
-            return (f'No speech by "{spoken_by}" matching {query!r}. The speaker may not be '
+            scope = " and ".join(filter(None, [
+                f"matching {topic!r}" if topic else None,
+                f"whose voice reads {mood}" if mood else None])) or "in the corpus"
+            return (f'No speech by "{spoken_by}" {scope}. The speaker may not be '
                     f"enrolled, or that driver has no analyzed radio in the corpus.")
-    return graph_context.render_brief(rows[:limit]) or "No matching speech found."
+    return note + (graph_context.render_brief(rows[:limit]) or "No matching speech found.")
 
 
 @beta_async_tool
 async def expand_speech(speech_id: str) -> str:
-    """Show everything the graph knows around one piece of speech.
+    """Show everything the graph knows around one piece of speech, or several at once.
 
     Who said it, in which session, the lap it happened on and that lap's time against the
     previous one, the drivers or teams it names, and the lines immediately before and
     after. Call this before answering a question about a specific moment — search results
     alone omit the surroundings that usually decide what a quote actually means.
 
+    Pass several ids separated by commas to expand them in one call. A question about a
+    pattern across the corpus needs the context of every hit, and one id per call turns
+    that into a round trip each.
+
     Args:
-        speech_id: An id from search_speech, of the form
-            "3f2b1a4c-...". Ids appear in square brackets at the start of each result.
+        speech_id: One id from search_speech, of the form "3f2b1a4c-…", or several
+            separated by commas. Ids appear in square brackets at the start of each
+            search result. At most 10 are expanded per call.
     """
-    rows = await graph_context.expand([speech_id])
+    ids = SPEECH_ID_RE.findall(speech_id or "")
+    if not ids:
+        return (f"No speech id found in {speech_id!r}. Ids are UUIDs from search_speech, "
+                f"in square brackets at the start of each result.")
+    rows = await graph_context.expand(ids[:10])
     if not rows:
-        return (f"No speech with id {speech_id}. Ids come from search_speech; the graph "
-                f"may also be out of date if it has not been re-synced.")
-    return graph_context.render_context(rows)
+        return (f"No speech with {'id' if len(ids) == 1 else 'those ids'} {', '.join(ids[:10])}. "
+                f"Ids come from search_speech; the graph may also be out of date if it has "
+                f"not been re-synced.")
+    # Say which ids came back empty rather than silently returning fewer than asked for —
+    # a model comparing counts would otherwise read the gap as absence of evidence.
+    missing = [i for i in ids[:10] if i not in {r["speech_id"] for r in rows}]
+    out = graph_context.render_context(rows)
+    if missing:
+        out += f"\n\nNot in the graph: {', '.join(missing)}."
+    return out
 
 
 @beta_async_tool
@@ -197,19 +280,45 @@ async def driver_timeline(session_key: int, driver_number: int,
 
 
 @beta_async_tool
-async def compare_speakers(profile_id_a: str, profile_id_b: str) -> str:
-    """Contrast two enrolled speakers: how much they talk, and how they come across.
+async def compare_speakers(profile_id_a: str, profile_id_b: str | None = None) -> str:
+    """Contrast enrolled speakers: how much they talk, and how they come across.
 
-    Use this for questions that put two people side by side. It reports counts and
-    aggregate readings only — for what was actually said, search instead.
+    Use this for questions that put people side by side. It reports counts and aggregate
+    readings only — for what was actually said, search instead.
+
+    Two speakers is the common case, but either argument accepts a comma-separated list,
+    so "how do all the engineers compare" is one call rather than a matrix of pairs.
+    Names work as well as ids: a name is resolved against the speaker directory, because a
+    question about "Marta" should not fail on the model not having copied a UUID.
 
     Args:
-        profile_id_a: A speaker profile id from the directory in your context.
-        profile_id_b: The other speaker profile id.
+        profile_id_a: A speaker profile id or display name, or several separated by commas.
+        profile_id_b: The other speaker, when comparing exactly two. Omit when the first
+            argument already lists everyone to compare.
     """
-    rows = await db.fetch(COMPARE_SPEAKERS_SQL, [profile_id_a, profile_id_b])
+    tokens = [t.strip() for arg in (profile_id_a, profile_id_b)
+              if not is_placeholder(arg) for t in str(arg).split(",") if t.strip()]
+    if not tokens:
+        return "Name at least one speaker, by profile id or display name."
+
+    ids = [t for t in tokens if SPEECH_ID_RE.fullmatch(t)]
+    names = [t for t in tokens if not SPEECH_ID_RE.fullmatch(t)]
+    if names:
+        # Case-insensitive exact match: a LIKE would let "Dan" pull in "Dan Reisz" *and*
+        # "Daniel Voss" and report a comparison between the wrong pair.
+        found = await db.fetch(
+            "SELECT id, display_name FROM speaker_profiles WHERE lower(display_name) = ANY($1)",
+            [n.lower() for n in names])
+        ids += [str(r["id"]) for r in found]
+        unknown = [n for n in names
+                   if n.lower() not in {r["display_name"].lower() for r in found}]
+        if unknown:
+            return (f"No enrolled speaker named {', '.join(unknown)}. The directory in your "
+                    f"context lists everyone who is enrolled.")
+
+    rows = await db.fetch(COMPARE_SPEAKERS_SQL, ids)
     if not rows:
-        return "Neither profile id was found. Ids come from the speaker directory."
+        return "No profile matched. Ids and names come from the speaker directory."
     out = []
     for r in rows:
         out.append(
@@ -341,6 +450,12 @@ heuristic over acoustic features — speech rate, pitch, energy — not from a t
 model, and the text sentiment is a separate model that can disagree with it. Say "his voice \
 reads stressed" or "the words read negative", never "he was stressed". Where the two \
 readings disagree, report the disagreement; it is a signal, not noise to average away.
+
+Tone is searchable, but only through the mood filter. It is a stored label, not words, so \
+searching for the word "stressed" finds speech that says the word — pass mood="stressed" \
+instead, on its own or alongside a topic. With no topic those results are ordered by \
+recency, not by intensity: there is no "most stressed", only speech the classifier labelled \
+that way.
 
 Say when the corpus cannot answer. Speaker identification abstains rather than guess, so \
 plenty of speech is attributed to nobody. Lap alignment needs a recording timestamp that \
@@ -538,6 +653,13 @@ async def _run_openai_compatible(cfg, model, system, messages, emit) -> dict:
 
         m = r.choices[0].message
         calls = m.tool_calls or []
+        # Some OpenAI-compatible endpoints reject an assistant turn carrying more than one
+        # tool_call -- NVIDIA's llama-3.1 answers "This model only supports single
+        # tool-calls at once" with a 400, which kills the turn on the *next* request rather
+        # than the one that fanned out. Serialising costs an extra hop and works on every
+        # provider; the model asks for the rest on the following iteration.
+        if len(calls) > 1:
+            calls = calls[:1]
         if m.content and m.content.strip():
             text = m.content
             await emit("message", text=m.content)

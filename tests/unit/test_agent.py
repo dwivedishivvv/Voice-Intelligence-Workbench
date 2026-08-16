@@ -244,7 +244,7 @@ def test_null_speaker_filter_does_not_suppress_results(monkeypatch):
     the case when this was first written. Stubs the two dependencies so the tool runs
     without Postgres or Neo4j, and asserts a bogus "null" filter does not swallow a real
     hit."""
-    async def fake_anchor(q, limit=8, mode="hybrid", speaker_id=None):
+    async def fake_anchor(q, limit=8, mode="hybrid", speaker_id=None, mood=None):
         return [{"speech_id": "abc-1", "kind": "utterance", "text": "hello there", "score": 1.0}]
 
     async def fake_expand(ids):
@@ -256,3 +256,204 @@ def test_null_speaker_filter_does_not_suppress_results(monkeypatch):
     out = asyncio.run(agent.search_speech.func(query="anything", spoken_by="null"))
     assert "No speech by" not in out, "a placeholder filter was treated as a real speaker"
     assert "abc-1" in out
+
+
+# --- searching by tone --------------------------------------------------------
+
+def _stub_search(monkeypatch, *, anchors=None, by_mood=None):
+    """Run the tools without Postgres or Neo4j, recording what they asked for."""
+    seen = {}
+
+    async def fake_anchor(q, limit=8, mode="hybrid", speaker_id=None, mood=None):
+        seen["anchor"] = {"q": q, "limit": limit, "mood": mood}
+        return anchors or []
+
+    async def fake_by_mood(mood, limit=10, speaker_id=None):
+        seen["by_mood"] = {"mood": mood, "limit": limit}
+        return by_mood or []
+
+    async def fake_expand(ids):
+        raise RuntimeError("graph unavailable")
+
+    monkeypatch.setattr(agent.search_svc, "anchor_speech", fake_anchor)
+    monkeypatch.setattr(agent.search_svc, "speech_by_mood", fake_by_mood)
+    monkeypatch.setattr(agent.graph_context, "expand", fake_expand)
+    return seen
+
+
+def test_tone_only_search_does_not_go_through_text_ranking(monkeypatch):
+    """The bug this fixes: "which calls sound stressed" was answered by searching the word
+    "stressed" in transcripts, which matches nothing, and the model reported the empty
+    result as a fact about the corpus. A mood with no topic must take the column path."""
+    hit = [{"speech_id": "abc-1", "kind": "radio_call", "text": "box box", "mood": "stressed"}]
+    seen = _stub_search(monkeypatch, by_mood=hit)
+
+    out = asyncio.run(agent.search_speech.func(mood="stressed"))
+    assert seen["by_mood"]["mood"] == "stressed"
+    assert "anchor" not in seen, "a tone-only search still ran a text query"
+    assert "abc-1" in out
+
+
+def test_tone_filter_composes_with_a_topic(monkeypatch):
+    """Topic and tone are separate axes; asking for both is one search, not two."""
+    seen = _stub_search(monkeypatch, anchors=[
+        {"speech_id": "abc-1", "kind": "utterance", "text": "tyres are gone", "mood": "tired"}])
+
+    asyncio.run(agent.search_speech.func(query="tyre wear", mood="tired"))
+    assert seen["anchor"] == {"q": "tyre wear", "limit": 8, "mood": "tired"}
+
+
+def test_unknown_mood_is_reported_as_a_bad_argument(monkeypatch):
+    """A mood the classifier cannot emit matches nothing. Left to run, "no speech found"
+    reads as a statement about the corpus rather than about the call."""
+    seen = _stub_search(monkeypatch)
+    out = asyncio.run(agent.search_speech.func(mood="furious"))
+    assert "not a tone reading" in out
+    assert all(k not in seen for k in ("anchor", "by_mood")), "a bad filter still hit the db"
+    for valid in agent.search_svc.MOODS:
+        assert valid in out, "the error should list what the classifier can emit"
+
+
+def test_empty_search_asks_for_a_filter_rather_than_scanning(monkeypatch):
+    seen = _stub_search(monkeypatch)
+    out = asyncio.run(agent.search_speech.func())
+    assert "query" in out and "mood" in out
+    assert not seen
+
+
+def test_placeholder_mood_is_ignored_like_any_other_optional_argument(monkeypatch):
+    """Same failure mode as spoken_by="null": taken literally it filters to a tone that
+    cannot exist and the tool reports an empty corpus."""
+    seen = _stub_search(monkeypatch, anchors=[
+        {"speech_id": "abc-1", "kind": "utterance", "text": "hello", "score": 1.0}])
+    out = asyncio.run(agent.search_speech.func(query="anything", mood="null"))
+    assert seen["anchor"]["mood"] is None
+    assert "abc-1" in out
+
+
+def test_search_limit_is_capped(monkeypatch):
+    """A model asking for 1000 hits should get a bounded query, not a table scan rendered
+    into the context window."""
+    seen = _stub_search(monkeypatch, anchors=[])
+    asyncio.run(agent.search_speech.func(query="anything", limit=1000))
+    assert seen["anchor"]["limit"] <= 25
+
+
+def test_search_results_carry_the_tone_reading(monkeypatch):
+    """A tone-filtered search whose hits render as plain quotes invites the model to drop
+    the qualifier. The reading rides along on the line, hedged."""
+    _stub_search(monkeypatch, by_mood=[
+        {"speech_id": "abc-1", "kind": "radio_call", "text": "box box", "mood": "stressed"}])
+    out = asyncio.run(agent.search_speech.func(mood="stressed"))
+    assert "voice reads stressed" in out
+    assert "was stressed" not in out
+
+
+def test_prompt_tells_the_model_tone_is_filtered_not_searched():
+    """The tool description alone is not enough: the model has to know that the word and
+    the label are different things before it decides how to look."""
+    s = agent.SYSTEM.lower()
+    assert "mood" in s and "recency" in s
+
+
+# --- tools compose ------------------------------------------------------------
+
+def test_expand_accepts_several_ids_in_one_call(monkeypatch):
+    """A question about a pattern needs the context of every hit. One id per call turns
+    that into a round trip each, and models give up on the fifth."""
+    ids = ["3dc30df5-8d0c-4788-8296-2a3f539f2c8b", "f0841aeb-8014-4989-9dca-d4e4112ea7b7"]
+    asked = {}
+
+    async def fake_expand(passed):
+        asked["ids"] = passed
+        return [{"speech_id": i, "text": "x"} for i in passed]
+
+    monkeypatch.setattr(agent.graph_context, "expand", fake_expand)
+    monkeypatch.setattr(agent.graph_context, "render_context", lambda rows: "ctx")
+    asyncio.run(agent.expand_speech.func(", ".join(ids)))
+    assert asked["ids"] == ids
+
+
+def test_expand_names_the_ids_the_graph_did_not_have(monkeypatch):
+    """Returning fewer rows than asked for, silently, reads as absence of evidence."""
+    ids = ["3dc30df5-8d0c-4788-8296-2a3f539f2c8b", "f0841aeb-8014-4989-9dca-d4e4112ea7b7"]
+
+    async def fake_expand(passed):
+        return [{"speech_id": passed[0], "text": "x"}]
+
+    monkeypatch.setattr(agent.graph_context, "expand", fake_expand)
+    monkeypatch.setattr(agent.graph_context, "render_context", lambda rows: "ctx")
+    out = asyncio.run(agent.expand_speech.func(", ".join(ids)))
+    assert ids[1] in out and "Not in the graph" in out
+
+
+def test_one_tool_call_per_turn_on_openai_compatible_endpoints(monkeypatch):
+    """NVIDIA's llama-3.1 endpoint answers a request whose history carries two tool_calls
+    in one assistant turn with `400: This model only supports single tool-calls at once`,
+    which kills the turn on the request *after* the one that fanned out. Making the tools
+    composable made the model fan out, so the loop serialises them itself.
+    """
+    from types import SimpleNamespace as NS
+
+    def call(name, args, cid):
+        return NS(id=cid, function=NS(name=name, arguments=args))
+
+    sent = []
+    responses = [
+        NS(choices=[NS(message=NS(content=None, tool_calls=[
+            call("search_speech", '{"mood": "calm"}', "c1"),
+            call("search_speech", '{"mood": "stressed"}', "c2")]))],
+           usage=NS(prompt_tokens=10, completion_tokens=2)),
+        NS(choices=[NS(message=NS(content="done", tool_calls=[]))],
+           usage=NS(prompt_tokens=10, completion_tokens=2)),
+    ]
+
+    class FakeCompletions:
+        async def create(self, **kw):
+            sent.append(kw["messages"])
+            return responses[len(sent) - 1]
+
+    class FakeClient:
+        def __init__(self, **kw):
+            self.chat = NS(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeClient)
+    dispatched = []
+
+    async def fake_dispatch(name, args):
+        dispatched.append((name, args))
+        return "no rows"
+
+    monkeypatch.setattr(agent, "_dispatch", fake_dispatch)
+
+    cfg = Settings(llm_enabled=True, llm_provider="nvidia", nvidia_api_key="x",
+                   llm_max_iterations=4)
+    result = asyncio.run(agent._run_openai_compatible(
+        cfg, "m", "sys", [{"role": "user", "content": "q"}], lambda *a, **k: _noop()))
+
+    assert len(dispatched) == 1, "both calls in one turn is what the provider rejects"
+    echoed = [m for m in sent[1] if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert len(echoed[0]["tool_calls"]) == 1
+    assert result["answer"] == "done"
+
+
+async def _noop(*a, **k):
+    return None
+
+
+def test_compare_speakers_resolves_names_as_well_as_ids(monkeypatch):
+    """The roster gives ids, but a question about "Marta" should not fail on the model not
+    having copied a UUID across."""
+    calls = {}
+
+    async def fake_fetch(sql, arg):
+        calls.setdefault("sql", []).append((sql, arg))
+        if "display_name" in sql and "ANY" in sql and "speaker_profiles WHERE" in sql:
+            return [{"id": "3dc30df5-8d0c-4788-8296-2a3f539f2c8b", "display_name": "Marta Kolar"}]
+        return []
+
+    monkeypatch.setattr(agent.db, "fetch", fake_fetch)
+    out = asyncio.run(agent.compare_speakers.func("Marta Kolar", "Dan Reisz"))
+    # "Dan Reisz" is not in the stubbed directory, so the tool says which name it could not
+    # place rather than comparing whoever it did find.
+    assert "Dan Reisz" in out and "No enrolled speaker named" in out

@@ -549,6 +549,31 @@ returning the answer plus the speech ids it cited, the tools it used and token u
 Blocking, with progress mirrored to `WS /v1/ws/jobs/{conversation_id}`. 503 when
 `LLM_ENABLED=false`.
 
+### The agent's tools
+
+Four read-only tools, declared in `api/app/services/agent.py`. Each is plain async code
+that knows nothing about who is calling it, so the schema for both wire formats is derived
+from one declaration. Every filter is optional and composes with every other, because
+questions arrive in combinations nobody enumerated in advance.
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `search_speech` | `query`, `spoken_by`, `mood`, `limit` | Finds speech by topic, by tone, or both, across processed utterances *and* F1 radio calls. Returns one line per hit: id, speaker, session and lap where known, the tone reading, and a clipped quote. |
+| `expand_speech` | `speech_id` (one id, or several comma-separated) | Everything the graph knows around a piece of speech: speaker, session, the lap and its time against the previous one, entities named, and the lines either side. Names any id the graph did not have rather than returning fewer rows silently. |
+| `driver_timeline` | `session_key`, `driver_number`, `from_lap`, `to_lap` | One driver through one session: lap times with the radio spoken on each lap. The comparison search cannot make, because it ranks speech without knowing what the car was doing. |
+| `compare_speakers` | `profile_id_a`, `profile_id_b` (either accepts a comma-separated list; names work as well as ids) | Contrasts enrolled speakers on counts and aggregate readings. For what was actually said, search instead. |
+
+**Topic and tone are different axes.** Tone is a stored label, so no amount of searching
+for the word "stressed" finds speech whose voice reads stressed — that is `mood`, which
+takes `calm`, `stressed` or `tired` and works alone or alongside a topic. With no topic
+the results are ordered by recency, not intensity: the classifier emits a label, not a
+magnitude, so there is no "most stressed". A tone word typed into `query` that matches no
+text falls back to the filter and says so in the result, because a model that reaches for
+the word instead of the filter should not be told the corpus is empty.
+
+Nothing writes. A test asserts that — the tool bodies and every query constant they reach
+for are scanned for write keywords.
+
 **Graph** — `POST /v1/graph/context` (`q` or explicit `speech_ids`, `limit`, `mode`,
 `speaker_id`, `max_chars`): ranks speech in Postgres, expands each hit's neighbourhood in
 Neo4j, and returns both the structured rows and a rendered text block. 503 when

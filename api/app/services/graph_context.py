@@ -171,7 +171,11 @@ def render_brief(rows: list[dict], max_text: int = 160) -> str:
         where = f", {r['session']}" if r.get("session") else ""
         laps = r.get("laps") or []
         lap = f", lap {laps[0]['number']}" if laps and laps[0].get("number") is not None else ""
-        lines.append(f'[{r["speech_id"]}] {who}{where}{lap}: "{text}"')
+        # The tone reading rides along on the search line, hedged the same way it is
+        # everywhere else. Without it a tone-filtered search returns hits that look like
+        # plain quotes, and the model reports them with the qualifier dropped.
+        tone = f", voice reads {r['mood']}" if r.get("mood") else ""
+        lines.append(f'[{r["speech_id"]}] {who}{where}{lap}{tone}: "{text}"')
     return chr(10).join(lines)
 
 
