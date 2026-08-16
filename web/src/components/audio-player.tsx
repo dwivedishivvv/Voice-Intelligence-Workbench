@@ -125,7 +125,10 @@ export function AudioPlayer({
             key={i}
             className={`wf-seg${b.hatch ? " hatch" : ""}`}
             style={{
-              flex: 1, height: b.h, background: b.hatch ? "transparent" : b.color,
+              flex: 1, height: b.h,
+              // the hatch is a background *image*, so a faint fill under it keeps an
+              // unjudged stretch reading as bars rather than as a hole in the waveform
+              background: b.hatch ? muted(10) : b.color,
               borderTop: b.hatch ? `1px solid ${muted(35)}` : undefined,
             }}
           />

@@ -82,8 +82,11 @@ function VoiceCard({ s, thresholds, onAct }: {
           <>Closest profile, but {num((thresholds.id_threshold) - (s.match_score || 0))} under the
             auto-label bar. Proposal only — nothing has been written.</>
         )}
-        {outcome === "unknown" && (
-          <>Audio was good enough to judge. No enrolled profile came close — best was {num(s.match_score)}.</>
+        {/* A zero best-match means the comparison had nothing to compare against — saying
+            "best was 0.00" would read as a bad match rather than an empty directory. */}
+        {outcome === "unknown" && (s.match_score
+          ? <>Audio was good enough to judge. No enrolled profile came close — best was {num(s.match_score)}.</>
+          : <>Audio was good enough to judge, but no profile is enrolled to compare it against.</>
         )}
         {abstained && (
           <>Reliability {num(s.reliability)} — under the {num(thresholds.reliability_fair)} floor,
@@ -347,7 +350,7 @@ export default function ClipDetail() {
             padding: "10px 12px", alignItems: "flex-start",
           }}>
             <span className="mono" style={{ fontSize: 11, color: AMBER_INK, flex: "none", paddingTop: 2 }}>
-              {String(w.code || "WARN").toUpperCase().slice(0, 12)}
+              WARN
             </span>
             <div>
               <div style={{ fontFamily: "var(--font-heading)", fontSize: 15 }}>

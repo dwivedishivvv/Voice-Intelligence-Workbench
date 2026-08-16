@@ -621,7 +621,7 @@ function RaceDetail({ raceId }: { raceId: string }) {
           {stats?.voices?.length > 0 && (
             <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 9 }}>
               <span className="kicker-sm" style={{ color: muted(55) }}>Voices heard here</span>
-              {stats.voices.map((v: any) => {
+              {stats.voices.slice(0, 8).map((v: any) => {
                 const name = v.display_name || `Voice ${String(v.key).slice(0, 4)}`;
                 return (
                   <div key={v.key} style={{
@@ -642,6 +642,11 @@ function RaceDetail({ raceId }: { raceId: string }) {
                   </div>
                 );
               })}
+              {stats.voices.length > 8 && (
+                <span className="mono" style={{ fontSize: 11, color: muted(45) }}>
+                  + {stats.voices.length - 8} quieter voices
+                </span>
+              )}
               <a href="/speakers" style={{ fontSize: 12.5, marginTop: 2 }}
                  onClick={(e) => { e.preventDefault(); navigate("/speakers"); }}>
                 Open in Speakers

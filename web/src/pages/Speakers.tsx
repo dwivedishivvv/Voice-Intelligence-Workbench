@@ -23,6 +23,11 @@ const montageBars = (seed: string) => {
     Math.round(6 + Math.abs(Math.sin((i + (h % 17)) * 1.3)) * 20));
 };
 
+/** Clusters are stored with a placeholder label until someone names them, so fall back to
+ *  the id — "Voice 9a2f" is at least a handle you can tell apart from the next one. */
+const clusterLabel = (c: Cluster) =>
+  c.label && c.label.toLowerCase() !== "unknown" ? c.label : `Voice ${c.id.slice(0, 4)}`;
+
 const cohesionColor = (c: number | null) =>
   c == null ? muted(30) : c >= 0.7 ? GREEN : c >= 0.5 ? AMBER : RED;
 
@@ -218,7 +223,7 @@ export default function Speakers() {
                 alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${muted(8)}`,
               }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                  <span style={{ fontFamily: "var(--font-heading)", fontSize: 17 }}>{c.label}</span>
+                  <span style={{ fontFamily: "var(--font-heading)", fontSize: 17 }}>{clusterLabel(c)}</span>
                   <span className="mono" style={{ fontSize: 11, color: muted(50) }}>
                     {c.id.slice(0, 8)}
                   </span>
@@ -248,14 +253,18 @@ export default function Speakers() {
                     display: "flex", justifyContent: "space-between", fontSize: 11, color: muted(58),
                   }}>
                     <span>{c.n_members} segments · {fmtSpeech(c.total_speech_s)}</span>
-                    <span>{num(c.intra_cohesion)}</span>
+                    <span>{c.intra_cohesion == null ? "cohesion n/a" : num(c.intra_cohesion)}</span>
                   </div>
-                  <div className="bar" style={{ height: 5 }}>
-                    <span style={{
-                      width: `${Math.round((c.intra_cohesion || 0) * 100)}%`,
-                      background: cohesionColor(c.intra_cohesion),
-                    }} />
-                  </div>
+                  {/* a single-segment cluster has nothing to agree with itself about, so
+                      there is no cohesion to draw — an empty bar would imply zero */}
+                  {c.intra_cohesion != null && (
+                    <div className="bar" style={{ height: 5 }}>
+                      <span style={{
+                        width: `${Math.round(c.intra_cohesion * 100)}%`,
+                        background: cohesionColor(c.intra_cohesion),
+                      }} />
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
@@ -283,7 +292,7 @@ export default function Speakers() {
         onClose={() => setPromote(null)}
         kicker="Speakers"
         title="Name this recurring voice"
-        subject={promote ? `${promote.label} · ${promote.n_members} segments · ${fmtSpeech(promote.total_speech_s)}` : ""}
+        subject={promote ? `${clusterLabel(promote)} · ${promote.n_members} segments · ${fmtSpeech(promote.total_speech_s)}` : ""}
         consequence="Re-labels every past appearance of this voice, and it is recognised in future clips."
         confirm="Create profile"
         width="560px"
