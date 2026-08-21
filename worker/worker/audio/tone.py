@@ -87,16 +87,26 @@ def classify(features: dict, baseline: dict | None = None) -> str:
     # voices/mics — someone's natural pitch might sit above or below the global cutoff for
     # reasons that have nothing to do with stress. Once a session has a few calm-looking
     # samples to anchor to, judge relative to THIS speaker's own baseline instead.
+    #
+    # Absolute pitch height (pitch_mean) is deliberately not part of either "stressed"
+    # trigger below. It is mostly vocal anatomy — who is talking — not arousal, and a live
+    # session has no per-chunk speaker ID (see the Live page copy: "Identification is not
+    # run per chunk"). A single EMA baseline gets built from whichever voice happened to
+    # read as calm first, so on any session with more than one speaker — two people
+    # sharing a mic, or a broadcast alternating between commentators — a naturally
+    # higher-pitched second speaker cleared the old baseline["pitch_mean"] * 1.25 bar on
+    # pitch alone and got called "stressed" regardless of how they actually sounded.
+    # Pitch *variability* (pitch_std) and speech rate are far more speaker-invariant
+    # arousal signals, so they carry the whole test now.
     if baseline and baseline["n"] >= MIN_BASELINE_SAMPLES and baseline["pitch_mean"] > 0:
         if rate < baseline["rate"] * 0.55 and pitch_std < baseline["pitch_std"] * 0.6:
             return "tired"
-        if (rate > baseline["rate"] * 1.45 or pitch_mean > baseline["pitch_mean"] * 1.25
-                or pitch_std > baseline["pitch_std"] * 1.8):
+        if rate > baseline["rate"] * 1.45 or pitch_std > baseline["pitch_std"] * 1.8:
             return "stressed"
         return "calm"
 
     if rate < 1.8 and pitch_std < 15:
         return "tired"
-    if rate > 3.8 or pitch_mean > 220 or pitch_std > 40:
+    if rate > 3.8 or pitch_std > 40:
         return "stressed"
     return "calm"

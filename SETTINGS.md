@@ -42,8 +42,8 @@ UI should enforce, not what the API currently enforces. See [Gaps](#gaps-and-bug
 
 | Key | Type | Default | Valid range | Entry format | What it does |
 |---|---|---|---|---|---|
-| `max_upload_mb` | int | 50 | 1–2000 | number, step 1, suffix "MB" | Rejects larger uploads at the API boundary |
-| `max_duration_s` | float | 90.0 | 1–3600, `> target_duration_s` | number, step 1, suffix "s" | Hard ceiling; longer audio is rejected |
+| `max_upload_mb` | int | 500 | 1–2000 | number, step 1, suffix "MB" | Rejects larger uploads at the API boundary |
+| `max_duration_s` | float | 3600.0 | 1–3600, `> target_duration_s` | number, step 1, suffix "s" | Hard ceiling; longer audio is rejected |
 | `target_duration_s` | float | 60.0 | 1–`max_duration_s` | number, step 1, suffix "s" | Preferred clip length; longer clips get trimmed |
 | `min_duration_s` | float | 0.5 | 0.1–10 | number, step 0.1, suffix "s" | Floor below which a file isn't worth processing |
 
@@ -75,7 +75,7 @@ UI should enforce, not what the API currently enforces. See [Gaps](#gaps-and-bug
 | Key | Type | Default | Valid range | Entry format | What it does |
 |---|---|---|---|---|---|
 | `diar_min_speakers` | int | 1 | 1–`diar_max_speakers` | number, step 1 | Lower bound handed to pyannote |
-| `diar_max_speakers` | int | 4 | `diar_min_speakers`–20 | number, step 1 | Upper bound handed to pyannote |
+| `diar_max_speakers` | int | 50 | `diar_min_speakers`–50 | number, step 1 | Upper bound handed to pyannote; 50 stands in for unlimited (see common/config.py) |
 | `min_turn_s` | float | 0.4 | 0.05–5 | number, step 0.05, suffix "s" | Turns shorter than this are dropped |
 | `merge_gap_s` | float | 0.6 | 0.0–5 | number, step 0.1, suffix "s" | Same-speaker turns closer than this are merged |
 | `vad_snap_tol_s` | float | 0.15 | 0.0–1 | number, step 0.05, suffix "s" | Tolerance for snapping diarization edges to VAD edges |

@@ -31,6 +31,15 @@ export const api = {
     fd.append("file", blob, `${seq}.webm`);
     return req(`/v1/live/${sessionId}/chunk?seq=${seq}`, { method: "POST", body: fd });
   },
+  // Names an unmatched (or only-suggested) live turn from the embedding the worker already
+  // computed for it — no re-recording needed. Enrolls into an existing profile of that name
+  // if one exists, otherwise creates one; every later chunk's identify() call can then match it.
+  tagLiveSpeaker: (body: { display_name: string; embedding: number[]; duration_s: number; reliability: number }) =>
+    req("/v1/live/tag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   reprocess: (id: string) => req(`/v1/clips/${id}/reprocess`, { method: "POST" }),
   assignSpeaker: (clipId: string, label: string, body: object) =>
     req(`/v1/clips/${clipId}/speakers/${label}/assign`, {
@@ -40,6 +49,7 @@ export const api = {
     }),
   listSpeakers: () => req("/v1/speakers"),
   getSpeaker: (id: string) => req(`/v1/speakers/${id}`),
+  speakerClips: (id: string) => req(`/v1/speakers/${id}/clips`),
   // keep_id absorbs source_id: the kept profile gains the other's enrollments and its
   // centroid (and cohesion) are recomputed from the combined set.
   mergeSpeakers: (keepId: string, sourceId: string) =>
@@ -78,6 +88,9 @@ export const api = {
   // Measures thresholds against your own enrollments and returns suggestions. It writes a
   // calibration_runs row, never a setting — applying is a separate, explicit PATCH.
   calibrate: () => req("/v1/admin/calibrate", { method: "POST" }),
+  // Merges unclaimed clusters that are the same voice. Online clustering can only compare
+  // against the clusters that existed at the time, so one person drifts across several.
+  consolidateClusters: () => req("/v1/admin/clusters/consolidate", { method: "POST" }),
   // The agent's own config. Keys are write-only: the GET reports whether one is installed
   // and its last four characters, never the key itself.
   getLLM: () => req("/v1/admin/llm"),
@@ -103,11 +116,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ category, repo_id }),
     }),
-  agentAsk: (question: string, history: unknown[] | null, conversationId: string) =>
+  agentAsk: (question: string, history: unknown[] | null, conversationId: string, signal?: AbortSignal) =>
     req("/v1/agent/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, history, conversation_id: conversationId }),
+      signal,
     }),
   graphSummary: () => req("/v1/admin/graph/summary"),
 
@@ -139,4 +153,21 @@ export const api = {
   },
   // the SVG route needs auth but is used as an <img>/fetch source, hence the ?key= form
   raceSvgUrl: (id: string) => `/v1/races/${id}/svg?key=${encodeURIComponent(API_KEY)}`,
+
+  // Demo hook for Live: an official F1 livetiming radio clip, run through the same
+  // transcribe+tone analysis as a live mic chunk (see api/app/routers/f1.py::ingest).
+  // Cached calls come back inline; a fresh one returns a ws_url on the shared job:{id}
+  // channel — same contract every other job publishes on.
+  ingestF1Radio: (recording_url: string) =>
+    req("/v1/f1/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recording_url }),
+    }),
+  // Same analysis, for a radio clip that only exists as a local mp3 (no livetiming URL).
+  uploadF1Radio: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req("/v1/f1/ingest/upload", { method: "POST", body: fd });
+  },
 };

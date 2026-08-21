@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 DB_DIR = Path(__file__).resolve().parents[2] / "db"
-REPLAYABLE = ["races.sql", "f1.sql"]
+REPLAYABLE = ["races.sql", "f1.sql", "ontrack.sql", "speaker_quality.sql"]
 
 
 def _statements(name: str) -> list[str]:

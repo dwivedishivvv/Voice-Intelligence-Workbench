@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from common.config import get_settings, get_effective_settings
-from common import db, storage, audit as audit_mod
+from common import db, storage, audit as audit_mod, graph_sync
 from ..auth import get_current_user
 from ..services import queue, ingest
 
@@ -166,6 +166,7 @@ async def delete_clip(clip_id: str, user=Depends(get_current_user)):
     await db.insert("deletion_receipts", {"object_type": "clip", "object_id": clip_id,
                                            "sha256": row["sha256"], "reason": "user_requested"})
     await audit_mod.audit("clip.delete", "clip", clip_id, actor=user)
+    await graph_sync.resync()
     return {"ok": True}
 
 

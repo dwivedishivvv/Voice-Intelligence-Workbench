@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from common import db, audit as audit_mod, speaker as sc
+from common import db, audit as audit_mod, speaker as sc, graph_sync
 from ..auth import get_current_user
 
 router = APIRouter(prefix="/v1/speakers", tags=["speakers"])
@@ -62,6 +62,7 @@ async def patch_profile(profile_id: str, body: PatchProfile, user=Depends(get_cu
         await db.execute(f"UPDATE speaker_profiles SET {', '.join(sets)}, updated_at=now() WHERE id=${len(params)}", *params)
         await audit_mod.audit("speaker.rename", "speaker_profile", profile_id,
                                after=body.model_dump(exclude_none=True), actor=user)
+        await graph_sync.resync()
     return {"ok": True}
 
 
@@ -74,6 +75,7 @@ async def delete_profile(profile_id: str, reassign_to: str | None = None, user=D
         await db.execute("UPDATE utterances SET profile_id=NULL WHERE profile_id=$1", profile_id)
         await db.execute("DELETE FROM speaker_profiles WHERE id=$1", profile_id)
     await audit_mod.audit("speaker.delete", "speaker_profile", profile_id, actor=user)
+    await graph_sync.resync()
     return {"ok": True}
 
 
@@ -95,6 +97,7 @@ async def merge(profile_id: str, body: MergeBody, user=Depends(get_current_user)
     await sc.merge_profiles(body.source_id, profile_id)
     await audit_mod.audit("speaker.merge", "speaker_profile", profile_id,
                            after={"merged_from": body.source_id}, actor=user)
+    await graph_sync.resync()
     return {"ok": True}
 
 

@@ -243,6 +243,54 @@ def _group_results(pool, utterances: list, groups: list[list[int]]) -> list[tupl
     return results
 
 
+def fuse_many(pool, items: list[tuple[str, str | None]]) -> list[dict]:
+    """fuse_one for a batch, with a single classifier forward pass for the whole list.
+
+    The live path scores every turn of a chunk; calling fuse_one per turn meant one GPU
+    round trip each, while _classify_text has always batched 32 at a time. Protocol text
+    never reaches the model here either, so a chunk of pure acknowledgements costs nothing.
+    """
+    out: list[dict] = [None] * len(items)          # type: ignore[list-item]
+    pending, texts = [], []
+    for i, (text, _mood) in enumerate(items):
+        if not text or _is_protocol(text):
+            out[i] = ("neutral", 0.0)              # type: ignore[assignment]
+        else:
+            pending.append(i)
+            texts.append(text)
+
+    if texts:
+        for i, (raw_label, raw_score) in zip(pending, _classify_text(pool, texts)):
+            out[i] = _signed(raw_label, raw_score)  # type: ignore[assignment]
+
+    results = []
+    for (label, signed), (_text, mood) in zip(out, items):  # type: ignore[misc]
+        fused = float(np.clip(signed + MOOD_SHIFT.get(mood, 0.0), -1.0, 1.0)) if mood else signed
+        results.append({"text_sentiment": label, "text_score": round(signed, 3),
+                        "sentiment": _label(fused), "sentiment_score": round(fused, 3)})
+    return results
+
+
+def fuse_one(pool, text: str, mood: str | None) -> dict:
+    """Text sentiment + acoustic-mood fusion for a single string, off the exact scoring
+    path _group_results/_analyze use for a whole clip: the protocol lexicon, the MOOD_SHIFT
+    nudge, the NEUTRAL_BAND deadband — same weighting, same guarantee that delivery can
+    only nudge a score, never manufacture one on its own.
+
+    For worker/main.py's live turns, which have no clip to run short-turn merging or a
+    context window over (see this module's docstring for why those exist) — a live turn
+    just gets the direct classifier read, still fused the same way.
+    """
+    if not text or _is_protocol(text):
+        label, signed = "neutral", 0.0
+    else:
+        raw_label, raw_score = _classify_text(pool, [text])[0]
+        label, signed = _signed(raw_label, raw_score)
+    fused = float(np.clip(signed + MOOD_SHIFT.get(mood, 0.0), -1.0, 1.0)) if mood else signed
+    return {"text_sentiment": label, "text_score": round(signed, 3),
+            "sentiment": _label(fused), "sentiment_score": round(fused, 3)}
+
+
 def _acoustic(ctx, u: dict, baseline) -> tuple[str | None, dict | None]:
     dur = u["end"] - u["start"]
     if dur < MIN_ACOUSTIC_S or ctx.audio_norm is None:

@@ -1,7 +1,8 @@
 """Fusion + label-normalization logic for the SENTIMENT stage. No model, no DB — this
 covers the arithmetic that decides what a user sees, which is the part that breaks silently."""
+import worker.stages.sentiment as sentiment_mod
 from worker.stages.sentiment import (
-    _normalize, _signed, _label, _is_protocol, _group, _context_prefix,
+    _normalize, _signed, _label, _is_protocol, _group, _context_prefix, fuse_one,
     NEUTRAL_BAND, MOOD_SHIFT, CONTEXT_DAMPING, MERGE_MAX_GAP_S,
 )
 
@@ -129,3 +130,89 @@ def test_label_thresholds():
     assert _label(NEUTRAL_BAND) == "neutral"        # boundary is exclusive
     assert _label(NEUTRAL_BAND + 0.01) == "positive"
     assert _label(-NEUTRAL_BAND - 0.01) == "negative"
+
+
+# ---- fuse_one: the single-string path live turns use (worker/main.py) ----
+# Same formula _analyze uses for a whole clip, just off one string instead of a group.
+
+def test_fuse_one_never_calls_the_model_on_protocol_text(monkeypatch):
+    def boom(pool, texts):
+        raise AssertionError("protocol text must not reach the classifier")
+    monkeypatch.setattr(sentiment_mod, "_classify_text", boom)
+    out = fuse_one(None, "Copy that.", "stressed")
+    # text side is neutral/0 (nothing was actually said); the mood nudge still applies to
+    # the fused score, same as _analyze does for a whole clip's protocol-classified turns —
+    # it just isn't enough on its own to clear the neutral band.
+    assert out["text_sentiment"] == "neutral" and out["text_score"] == 0.0
+    assert out["sentiment"] == "neutral"
+    assert out["sentiment_score"] == round(MOOD_SHIFT["stressed"], 3)
+
+
+def test_fuse_one_lets_delivery_nudge_a_borderline_fused_score(monkeypatch):
+    # mirrors test_mood_shifts_a_borderline_score_across_the_line, off fuse_one's single-
+    # string path instead of the whole-clip group path
+    monkeypatch.setattr(sentiment_mod, "_classify_text", lambda pool, texts: [("negative", 0.15)])
+    out = fuse_one(None, "we might have a small issue", "stressed")
+    assert out["text_score"] == -0.15
+    assert _label(-0.15) == "neutral"            # raw text score alone: inside the band
+    assert out["sentiment"] == "negative"        # stressed nudge clears it
+    assert out["sentiment_score"] == round(-0.15 + MOOD_SHIFT["stressed"], 3)
+
+
+def test_fuse_one_delivery_alone_cannot_invent_a_verdict(monkeypatch):
+    # the same guarantee test_neutral_band_keeps_a_mood_nudge_from_inventing_sentiment
+    # checks for the whole-clip path must hold for the single-string path too
+    monkeypatch.setattr(sentiment_mod, "_classify_text", lambda pool, texts: [("neutral", 0.9)])
+    out = fuse_one(None, "the car feels fine", "stressed")
+    assert out["sentiment"] == "neutral"
+
+
+def test_fuse_one_with_no_acoustic_mood_uses_the_text_score_as_is(monkeypatch):
+    monkeypatch.setattr(sentiment_mod, "_classify_text", lambda pool, texts: [("positive", 0.7)])
+    out = fuse_one(None, "great job everyone", None)
+    assert out["sentiment_score"] == 0.7
+
+
+# ---- fuse_many: the batched form the live path uses ----
+
+def test_fuse_many_classifies_the_whole_batch_in_one_pass(monkeypatch):
+    """Live scores every turn of a chunk. Calling fuse_one per turn was one GPU round trip
+    each, while _classify_text has always batched."""
+    calls = []
+
+    def fake(pool, texts):
+        calls.append(list(texts))
+        return [("negative", 0.8)] * len(texts)
+
+    monkeypatch.setattr(sentiment_mod, "_classify_text", fake)
+    out = sentiment_mod.fuse_many(None, [
+        ("the tyres are gone", "stressed"),
+        ("we are losing time", None),
+    ])
+    assert len(calls) == 1 and len(calls[0]) == 2
+    assert [o["sentiment"] for o in out] == ["negative", "negative"]
+
+
+def test_fuse_many_keeps_protocol_text_away_from_the_model(monkeypatch):
+    """A chunk of pure acknowledgements should cost nothing and score neutral."""
+    calls = []
+
+    def fake(pool, texts):
+        calls.append(list(texts))
+        return [("negative", 0.9)] * len(texts)
+
+    monkeypatch.setattr(sentiment_mod, "_classify_text", fake)
+    out = sentiment_mod.fuse_many(None, [
+        ("Copy that.", "calm"), ("the rear is sliding everywhere", "stressed"), ("", None)])
+    assert calls == [["the rear is sliding everywhere"]]
+    assert out[0]["text_sentiment"] == "neutral" and out[2]["text_sentiment"] == "neutral"
+    assert out[1]["sentiment"] == "negative"
+
+
+def test_fuse_many_agrees_with_fuse_one_row_by_row(monkeypatch):
+    """The batched path must not become a second, subtly different scoring rule."""
+    monkeypatch.setattr(sentiment_mod, "_classify_text",
+                        lambda pool, texts: [("negative", 0.5)] * len(texts))
+    items = [("we have a problem", "stressed"), ("we have a problem", "calm"),
+             ("we have a problem", None)]
+    assert sentiment_mod.fuse_many(None, items) == [fuse_one(None, t, m) for t, m in items]

@@ -28,8 +28,16 @@ UNWIND $ids AS sid
 MATCH (sp:Speech {speech_id: sid})
 OPTIONAL MATCH (sp)-[:SPOKEN_BY]->(spk:Speaker)
 OPTIONAL MATCH (sp)-[:IN_CLIP]->(clip:Clip)
-OPTIONAL MATCH (sp)-[:BY_DRIVER]->(drv:Driver)
-OPTIONAL MATCH (sp)-[:IN_SESSION]->(sess:Session)
+OPTIONAL MATCH (sp)-[:BY_DRIVER]->(drv_direct:Driver)
+// RadioCall gets BY_DRIVER straight from OpenF1's driver number. An Utterance never
+// does -- it only carries an enrolled Speaker -- so a race-context utterance chains
+// through VOICE_OF (Driver-[:VOICE_OF]->Speaker) to recover the same driver identity
+// that render_context/render_brief prefer over the bare speaker name. Without this a
+// driver's own enrolled voice showed up as "unidentified speaker" on every clip that
+// wasn't a radio call.
+OPTIONAL MATCH (drv_voice:Driver)-[:VOICE_OF]->(spk)
+WITH sid, sp, spk, clip, coalesce(drv_direct, drv_voice) AS drv
+OPTIONAL MATCH (sp)-[:IN_SESSION]->(sess)
 OPTIONAL MATCH (prev:Speech)-[:NEXT]->(sp)
 OPTIONAL MATCH (sp)-[:NEXT]->(nxt:Speech)
 OPTIONAL MATCH (sp)-[:DURING_LAP]->(lap:Lap)

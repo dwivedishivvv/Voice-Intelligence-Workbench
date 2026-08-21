@@ -110,7 +110,7 @@ Write-Host "datastores healthy." -ForegroundColor Green
 # interpreter has torch+cpu, which silently runs the whole pipeline on CPU.
 $workerPy = Join-Path $root "worker\.venv\Scripts\python.exe"
 if (-not (Test-Path $workerPy)) {
-  throw "missing $workerPy. Create it with: uv venv worker/.venv --python 3.11; uv pip install -p $workerPy -r worker/pyproject.toml"
+  throw "missing $workerPy. Create it with: uv venv worker/.venv --python 3.11; uv pip install -p $workerPy -r pyproject.toml --extra worker"
 }
 $gpu = & $workerPy -c "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 if ($gpu) {

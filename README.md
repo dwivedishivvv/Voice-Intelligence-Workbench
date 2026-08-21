@@ -106,7 +106,7 @@ reload on edit, and it's the only way the worker can reach a local GPU.
 ```powershell
 cp .env.example .env                  # edit POSTGRES_PASSWORD / API_KEY
 echo "<your-hf-token>" > .hf_token    # once — to accept pyannote's gated-model terms
-uv pip install -r api/pyproject.toml -r worker/pyproject.toml
+uv pip install -r pyproject.toml --extra api --extra worker
 cd web; npm install; cd ..
 .\start.ps1                           # postgres + redis in docker, then api / worker / web
 .\start.ps1 -Stop -Down               # stop everything
@@ -183,8 +183,8 @@ so any claim built on it can be traced back to the recording.
 
 See `GRAPH_RAG_PLAN.md` for the full node/edge model and what is deliberately left out.
 
-Dependencies are managed with [uv](https://docs.astral.sh/uv/) — see `api/pyproject.toml`
-and `worker/pyproject.toml`. The worker needs Python 3.11 and a CUDA build of torch; the
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) — see `pyproject.toml`'s
+`api` and `worker` extras. The worker needs Python 3.11 and a CUDA build of torch; the
 repo's `worker/.venv` is the interpreter `start.ps1` launches it with.
 
 ## Running natively on Windows
@@ -214,8 +214,8 @@ First run needs two venvs — **Python 3.11 specifically**, since torch 2.4 and 
 publish no 3.13 wheels:
 
 ```powershell
-uv venv --python 3.11 .venv;        $env:VIRTUAL_ENV=".venv";        uv pip install -r api/pyproject.toml
-uv venv --python 3.11 .venv-worker; $env:VIRTUAL_ENV=".venv-worker"; uv pip install -r worker/pyproject.toml
+uv venv --python 3.11 .venv;        $env:VIRTUAL_ENV=".venv";        uv pip install -r pyproject.toml --extra api
+uv venv --python 3.11 .venv-worker; $env:VIRTUAL_ENV=".venv-worker"; uv pip install -r pyproject.toml --extra worker
 cd web; npm install; cd ..
 ```
 

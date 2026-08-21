@@ -24,16 +24,22 @@ async def emit(clip_id: str, stage: str, state: str, **kw):
                           json.dumps({"type": "stage", "stage": stage, "state": state, "t": time.time(), **kw}))
 
 
-async def emit_live(session_id: str, seq: int, text: str, mood: str | None = None,
-                     features: dict | None = None, error: str | None = None):
-    # reuses the same job:{id} pubsub channel / WS route as clip processing —
-    # the WS endpoint just forwards whatever's published, no live-specific plumbing needed
+async def emit_live(session_id: str, seq: int, turns: list[dict], error: str | None = None):
+    """One chunk, one or more diarized speaker turns (worker/main.py now runs the same
+    diarize -> assign_words -> regroup pipeline a batch clip does, scoped to one short
+    chunk). Each turn dict already carries text/mood/speaker/speaker_result/speaker_score/
+    start_s/end_s — forwarded as-is, so a client only needs to know the list can hold more
+    than one entry now. speaker_result is identify()'s own vocabulary (confident |
+    suggested); "unknown" is never sent, so a client can't mistake abstention for a guess.
+
+    Reuses the same job:{id} pubsub channel / WS route as clip processing — the WS endpoint
+    just forwards whatever's published, no live-specific plumbing needed.
+    """
     if _redis is None:
         return
     await _redis.publish(f"job:{session_id}",
-                          json.dumps({"type": "live_transcript", "seq": seq, "text": text,
-                                      "mood": mood, "features": features,
-                                      "error": error, "t": time.time()}))
+                          json.dumps({"type": "live_transcript", "seq": seq,
+                                      "turns": turns, "error": error, "t": time.time()}))
 
 
 async def emit_f1_result(job_id: str, text: str, mood: str, features: dict | None, error: str | None = None):

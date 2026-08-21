@@ -16,7 +16,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from common.config import get_effective_settings, get_settings
-from common import db, storage, audit as audit_mod, speaker as sc
+from common import db, storage, audit as audit_mod, speaker as sc, graph_sync
 from ..auth import get_current_user
 from ..services import ingest
 
@@ -402,4 +402,5 @@ async def delete_race(race_id: str, delete_clips: bool = False, user=Depends(get
     await db.execute("DELETE FROM races WHERE id=$1", race_id)
     await audit_mod.audit("race.delete", "race", race_id, actor=user,
                            after={"clips_deleted": deleted})
+    await graph_sync.resync()
     return {"ok": True, "clips_deleted": deleted}

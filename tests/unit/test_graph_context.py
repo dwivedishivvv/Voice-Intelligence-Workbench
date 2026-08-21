@@ -179,7 +179,7 @@ def test_resolve_falls_back_to_postgres_for_ids_the_graph_has_not_seen(monkeypat
 
 
 def test_resolve_works_with_the_graph_switched_off(monkeypatch):
-    """GRAPH_ENABLED defaults to false. Citations are not an optional feature."""
+    """Citations must keep working when the graph is switched off. Citations are not an optional feature."""
     from api.app.services import graph_context as gc
     from common.graph import GraphUnavailable
 

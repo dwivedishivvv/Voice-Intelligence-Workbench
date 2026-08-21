@@ -160,7 +160,7 @@ time; the F1 page loads from Postgres instead of round-tripping OpenF1.
 ```
 
 `.env.example`: `NEO4J_URI=bolt://localhost:7687`, `NEO4J_USER`, `NEO4J_PASSWORD`,
-`GRAPH_ENABLED=false`. Dependency: `neo4j` (official driver, async) in `api/pyproject.toml`
+`GRAPH_ENABLED=false`. Dependency: `neo4j` (official driver, async) in `pyproject.toml`'s `api` extra
 only — the worker never touches it.
 
 `common/graph.py` mirrors `common/db.py`: module-level async driver, `init_driver`,

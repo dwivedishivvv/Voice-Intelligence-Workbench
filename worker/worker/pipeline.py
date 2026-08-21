@@ -3,13 +3,32 @@ import os
 import time
 import uuid
 
-from common import db
+import structlog
+
+from common import db, graph_sync
 from common.config import config_snapshot
+from common.graph import GraphUnavailable
 from .ctx import Ctx
 from .errors import RejectError
 from common.events import emit
 from .stages import (validate, preprocess, transcribe, diarize, reconcile,
                       embed, identify, postprocess, sentiment, index)
+
+log = structlog.get_logger()
+
+
+async def _sync_graph(cfg):
+    # Best-effort: Neo4j is a derived read model (GRAPH_RAG_PLAN.md), and an optional
+    # datastore being down or slow must never fail an otherwise-successful clip. Full
+    # rebuild rather than incremental — see the ponytail note on graph_sync.rebuild().
+    if not cfg.graph_enabled:
+        return
+    try:
+        await graph_sync.rebuild(cfg)
+    except GraphUnavailable:
+        pass
+    except Exception as e:
+        log.warning("graph_sync_failed", error=str(e)[:200])
 
 PIPELINE_VERSION = os.environ.get("PIPELINE_VERSION", "dev")
 
@@ -103,6 +122,7 @@ async def process_clip(clip_id: str, pool, cfg):
             run_id, total_ms, json.dumps(ctx.timings), json.dumps(ctx.warnings))
         await db.execute("UPDATE clips SET status='COMPLETE' WHERE id=$1", clip_id)
         await emit(clip_id, "COMPLETE", "done", total_ms=total_ms, progress=100)
+        await _sync_graph(cfg)
 
     except Exception as e:
         await db.execute(

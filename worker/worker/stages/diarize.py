@@ -23,18 +23,28 @@ def drop_onset_phantoms(turns, start_tol=0.3, dur_ratio=0.6):
     # boundary — high per-word confidence either way, so smoothing can't catch it.
     # A turn that starts within `start_tol`s of a much longer different-speaker turn's
     # own start is almost certainly this artifact, not real simultaneous speech.
+    #
+    # Only the window of turns starting within `start_tol` is scanned, not every pair:
+    # the input is sorted by start, so anything outside that window fails the
+    # |a.start - b.start| test by construction. The all-pairs form has no early exit, and
+    # O(n^2) stopped being free when the clip ceiling went from 90s to an hour — an hour
+    # of conversation is thousands of turns, not dozens.
+    n = len(turns)
     drop = set()
+    lo = 0
     for i, a in enumerate(turns):
+        while turns[lo]["start"] < a["start"] - start_tol:
+            lo += 1
         a_dur = a["end"] - a["start"]
-        for j, b in enumerate(turns):
-            if i == j or a["label"] == b["label"]:
-                continue
-            b_dur = b["end"] - b["start"]
-            if b_dur <= a_dur:
-                continue
-            if abs(a["start"] - b["start"]) <= start_tol and a_dur < dur_ratio * b_dur:
-                drop.add(i)
-                break
+        j = lo
+        while j < n and turns[j]["start"] <= a["start"] + start_tol:
+            b = turns[j]
+            if j != i and b["label"] != a["label"]:
+                b_dur = b["end"] - b["start"]
+                if b_dur > a_dur and a_dur < dur_ratio * b_dur:
+                    drop.add(i)
+                    break
+            j += 1
     return [t for i, t in enumerate(turns) if i not in drop]
 
 
@@ -69,16 +79,51 @@ def snap_to_vad(turns, vad, tol):
 
 
 def clean_turns(raw, vad, cfg):
+    """Cleaned turns, each marked `too_short` rather than silently deleted when it is.
+
+    Dropping a sub-`min_turn_s` turn outright conflated two different judgements: "too
+    short to fingerprint from" (true) and "too short to have happened" (false). The words
+    inside a dropped turn do not disappear with it — reconcile.assign_words simply gives
+    them to whichever *surviving* turn overlaps most, so a second speaker's one-word
+    interjection ("Copy", "Yes") was systematically attributed to the person talking
+    around it. They are kept here and excluded at the point where the short-audio problem
+    is real instead (stages/embed.py select_segments).
+
+    The long turns are still cleaned exactly as before, on their own: merge_adjacent walks
+    consecutive entries and stops merging across a label change, so leaving a short
+    interjection in the list would silently prevent the two same-speaker turns on either
+    side of it from joining. Overlap is likewise annotated among the long turns only —
+    letting a 0.3s "yeah" mark an 8s turn as overlapped would disqualify that speaker's
+    best audio from being fingerprinted at all.
+    """
     t = sorted(raw, key=lambda x: x["start"])
-    t = [x for x in t if x["end"] - x["start"] >= cfg.min_turn_s]
-    t = drop_onset_phantoms(t)
-    t = merge_adjacent(t, cfg.merge_gap_s)
-    t = annotate_overlaps(t)
-    t = snap_to_vad(t, vad, cfg.vad_snap_tol_s)
-    t = [x for x in t if x["end"] - x["start"] >= cfg.min_turn_s]
-    for i, x in enumerate(t):
+    long_turns = [x for x in t if x["end"] - x["start"] >= cfg.min_turn_s]
+    short_turns = [x for x in t if x["end"] - x["start"] < cfg.min_turn_s]
+
+    long_turns = drop_onset_phantoms(long_turns)
+    long_turns = merge_adjacent(long_turns, cfg.merge_gap_s)
+    long_turns = annotate_overlaps(long_turns)
+    long_turns = snap_to_vad(long_turns, vad, cfg.vad_snap_tol_s)
+    long_turns = [x for x in long_turns if x["end"] - x["start"] >= cfg.min_turn_s]
+    for x in long_turns:
+        x["too_short"] = False
+
+    kept_short = []
+    for x in short_turns:
+        y = dict(x)
+        y["too_short"] = True
+        y["snapped"] = False
+        # a brief turn landing inside another speaker's is what an interjection *is*, so
+        # flag it — but only on itself, never back onto the turn it interrupted
+        y["is_overlap"] = any(
+            o["label"] != y["label"] and min(o["end"], y["end"]) > max(o["start"], y["start"])
+            for o in long_turns)
+        kept_short.append(y)
+
+    out = sorted(long_turns + kept_short, key=lambda x: x["start"])
+    for i, x in enumerate(out):
         x["idx"] = i
-    return t
+    return out
 
 
 async def run(ctx):
@@ -100,11 +145,13 @@ async def run(ctx):
     overlap_s = sum(t["end"] - t["start"] for t in turns if t["is_overlap"])
     if ctx.speech_s and overlap_s / ctx.speech_s > ctx.cfg.overlap_warn_ratio:
         ctx.warn("HIGH_OVERLAP", ratio=overlap_s / ctx.speech_s)
-    if len(labels) == ctx.cfg.diar_max_speakers:
+    if len(labels) >= ctx.cfg.diar_max_speakers:
         ctx.warn("SPEAKER_COUNT_AT_CEILING", n=len(labels))
 
-    for t in turns:
-        await db.execute(
-            """INSERT INTO speaker_turns (clip_id, idx, local_label, start_s, end_s, is_overlap, snapped)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)""",
-            ctx.clip_id, t["idx"], t["label"], t["start"], t["end"], t["is_overlap"], t["snapped"])
+    # one round trip for the whole clip rather than one per turn — an hour of conversation
+    # is thousands of turns, and each await was a separate sequential query
+    await db.pool().executemany(
+        """INSERT INTO speaker_turns (clip_id, idx, local_label, start_s, end_s, is_overlap, snapped)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+        [(ctx.clip_id, t["idx"], t["label"], t["start"], t["end"], t["is_overlap"], t["snapped"])
+         for t in turns])

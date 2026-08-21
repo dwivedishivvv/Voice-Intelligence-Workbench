@@ -297,3 +297,11 @@ CREATE TABLE downloaded_models (
 -- OpenF1 sessions/drivers/laps + radio-call results. Same reasoning as races.sql, and
 -- ordered after it because f1.sql alters clips, which races.sql also touches.
 \i /db/f1.sql
+
+-- On-track events read out of speech (common/ontrack.py). Same reasoning as races.sql,
+-- and ordered after f1.sql because it alters radio_calls, which f1.sql creates.
+\i /db/ontrack.sql
+
+-- Diarization/fingerprinting quality columns. Same reasoning as races.sql; only alters
+-- tables init.sql itself creates, so its position among the includes does not matter.
+\i /db/speaker_quality.sql

@@ -1,8 +1,16 @@
 """Every threshold used anywhere in the pipeline comes from here — no literals in stage code."""
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings
+
+# Absolute, not the bare ".env" — pydantic-settings resolves a relative env_file against the
+# process's cwd, and the worker runs with cwd=worker/ (see start.ps1), so a relative path
+# here silently finds nothing and every setting falls back to its class default instead of
+# .env. That was masked for years because most defaults happen to mirror .env's dev
+# values — except GRAPH_PASSWORD, which is how this got caught.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 # Fields the Settings page is allowed to override live, via settings_overrides. Deliberately
 # excludes model/device/connection fields — those are baked into ModelPool at worker startup
@@ -17,8 +25,9 @@ TUNABLE_FIELDS = {
     "diar_min_speakers", "diar_max_speakers", "min_turn_s", "merge_gap_s", "vad_snap_tol_s",
     "overlap_warn_ratio", "smooth_min_conf",
     "embed_min_s", "embed_target_s", "reliability_good", "reliability_fair", "reliability_poor",
-    "id_threshold", "id_suggest_delta", "id_min_margin", "id_threshold_penalty",
-    "verify_threshold", "cluster_threshold", "auto_enroll", "auto_enroll_min_sim",
+    "id_threshold", "id_suggest_delta", "id_min_margin", "id_threshold_penalty", "id_min_z",
+    "verify_threshold", "cluster_threshold", "cluster_min_margin", "cluster_merge_threshold",
+    "auto_enroll", "auto_enroll_min_sim",
     "auto_enroll_min_reliability", "retention_days", "asr_beam_size", "asr_language",
     "job_timeout_s", "job_max_attempts",
     "graph_lap_match_tolerance_s", "ontrack_min_similarity", "ontrack_min_margin",
@@ -71,7 +80,8 @@ SETTINGS_CATEGORIES = {
     "Speaker identification": ["embed_min_s", "embed_target_s", "reliability_good",
                                 "reliability_fair", "reliability_poor", "id_threshold",
                                 "id_suggest_delta", "id_min_margin", "id_threshold_penalty",
-                                "verify_threshold", "cluster_threshold", "auto_enroll",
+                                "id_min_z", "verify_threshold", "cluster_threshold",
+                                "cluster_min_margin", "cluster_merge_threshold", "auto_enroll",
                                 "auto_enroll_min_sim", "auto_enroll_min_reliability"],
     "Transcription": ["asr_beam_size", "asr_language"],
     "Jobs & retention": ["job_timeout_s", "job_max_attempts", "retention_days"],
@@ -96,11 +106,11 @@ class Settings(BaseSettings):
     postgres_password: str = "change-me"
     redis_url: str = "redis://localhost:6379/0"
 
-    # Graph projection (GRAPH_RAG_PLAN.md). Off by default, and deliberately absent from
+    # Graph projection (GRAPH_RAG_PLAN.md). On by default. Deliberately absent from
     # TUNABLE_FIELDS for the same reason the other connection fields are: it is deployment
     # wiring, not a threshold, and Neo4j holds a *derived* read model — with it off, search,
     # the pipeline and every existing page carry on exactly as before.
-    graph_enabled: bool = False
+    graph_enabled: bool = True
     # Slack when matching a moment of speech to the lap it happened on. OpenF1's radio
     # timestamps and its lap timestamps come from different feeds and do not agree to the
     # millisecond, so a call a hair before a lap boundary would otherwise land on neither
@@ -179,8 +189,13 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 4096
     llm_effort: str = "high"
 
-    max_upload_mb: int = 50
-    max_duration_s: float = 90.0
+    # 90s (a couple of radio calls) was too tight for an upload that's a real recording
+    # session rather than a single call — raised to an hour, the top of the range
+    # SETTINGS.md already documented as valid. Still a real ceiling (stages/validate.py
+    # rejects TOO_LONG above it), not an unbounded accept; still overridable per-deployment
+    # from Settings > Ingest without a restart.
+    max_upload_mb: int = 500
+    max_duration_s: float = 3600.0
     target_duration_s: float = 60.0
     min_duration_s: float = 0.5
 
@@ -226,7 +241,13 @@ class Settings(BaseSettings):
     quality_min_bandwidth_hz: float = 3400.0
 
     diar_min_speakers: int = 1
-    diar_max_speakers: int = 4
+    # pyannote takes None here to mean "no cap, cluster freely" -- but this field can't
+    # actually be Optional: get_settings_view()/_coerce() (api/app/routers/admin.py) infer
+    # the Settings-page field type from `f.annotation is int`, and an int|None annotation
+    # falls through to "str", so a PATCH from Settings would store this as a raw string and
+    # hand pyannote "20" instead of 20 on the next job. 50 is the practical stand-in for
+    # unlimited instead -- no real recording has 50 simultaneous speakers.
+    diar_max_speakers: int = 50
     min_turn_s: float = 0.4
     merge_gap_s: float = 0.6
     vad_snap_tol_s: float = 0.15
@@ -256,8 +277,24 @@ class Settings(BaseSettings):
     id_suggest_delta: float = 0.08
     id_min_margin: float = 0.04
     id_threshold_penalty: float = 0.10
+    # AS-Norm gate (common/speaker.py identify()): how many standard deviations above this
+    # embedding's own impostor cohort the winning score has to sit before a name is
+    # written. id_min_margin only inspects rank 2, so it cannot separate "clearly the best
+    # of a well-spread field" from "top of a crowd where everything scores high" — the
+    # second being what a blended or poor-quality embedding looks like. Tightening only:
+    # a failed z-test downgrades confident to suggested, it never promotes anything.
+    id_min_z: float = 1.5
     verify_threshold: float = 0.62
     cluster_threshold: float = 0.52
+    # Same abstain-on-ambiguity posture as id_min_margin, for the clustering path that
+    # previously had none. Below this gap between the best and second-best cluster the
+    # segment is still filed under the nearer one (a third cluster would only fragment the
+    # identity further) but is not allowed to move either centroid.
+    cluster_min_margin: float = 0.04
+    # Cutoff for consolidate_clusters(). Stricter than cluster_threshold on purpose:
+    # declaring two whole clusters to be one person asserts far more than admitting one
+    # more segment to a cluster.
+    cluster_merge_threshold: float = 0.62
     auto_enroll: bool = False
     auto_enroll_min_sim: float = 0.85
     auto_enroll_min_reliability: float = 0.75
@@ -265,7 +302,7 @@ class Settings(BaseSettings):
     retention_days: int = 0
 
     class Config:
-        env_file = ".env"
+        env_file = _ENV_FILE
         case_sensitive = False
         extra = "ignore"
 

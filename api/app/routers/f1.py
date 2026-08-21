@@ -1,10 +1,11 @@
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 from common import db
@@ -194,5 +195,30 @@ async def ingest(body: IngestBody, user=Depends(get_current_user)):
         abs_path.write_bytes(r.content)
 
     await queue.enqueue_f1_radio(call_id, rel_path, body.session_key, body.driver_number)
+    return {"radio_call_id": call_id, "cached": False,
+            "job_id": call_id, "ws_url": f"/v1/ws/jobs/{call_id}"}
+
+
+@router.post("/ingest/upload")
+async def ingest_upload(file: UploadFile = File(...), session_key: int | None = None,
+                         driver_number: int | None = None, user=Depends(get_current_user)):
+    """Same transcribe+tone pass as /ingest, for a radio clip that only exists as a local
+    file (no livetiming URL to fetch). recording_url is NOT NULL/UNIQUE on radio_calls, so
+    an upload gets a synthetic upload://{uuid} in its place — never re-used, so every
+    upload is analyzed fresh rather than hitting another row's cache."""
+    cfg = await get_effective_settings()
+    call_id = str(uuid.uuid4())
+    row = await db.fetchrow(
+        """INSERT INTO radio_calls (id, session_key, driver_number, recording_url)
+           VALUES ($1,$2,$3,$4) RETURNING id""",
+        call_id, session_key, driver_number, f"upload://{call_id}")
+    call_id = str(row["id"])
+
+    rel_path = f"tmp/f1/{call_id}.mp3"
+    abs_path = Path(cfg.data_dir) / rel_path
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    abs_path.write_bytes(await file.read())
+
+    await queue.enqueue_f1_radio(call_id, rel_path, session_key, driver_number)
     return {"radio_call_id": call_id, "cached": False,
             "job_id": call_id, "ws_url": f"/v1/ws/jobs/{call_id}"}

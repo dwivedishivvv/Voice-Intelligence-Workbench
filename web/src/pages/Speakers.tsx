@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/api/client";
 import { Dialog } from "@/components/dialog";
 import { audioPeaks } from "@/lib/peaks";
-import { AMBER, GREEN, RED, fmtSpeech, muted, num, tagTone } from "@/lib/ui";
+import { AMBER, GREEN, RED, fmtDur, fmtSpeech, muted, num, tagTone } from "@/lib/ui";
+
+type ProfileClip = {
+  id: string; filename: string; duration_s: number | null; created_at: string;
+  talk_share: number | null; match_result: string | null;
+};
 
 type Profile = {
   id: string; display_name: string; status: string; n_enrollments: number;
@@ -45,9 +51,13 @@ const statusTone = (s: string) =>
   s === "confirmed" ? tagTone("accent") : s === "locked" ? tagTone("warn") : tagTone("neutral");
 
 export default function Speakers() {
+  const navigate = useNavigate();
   const [profiles, setProfiles] = useState<Profile[] | null>(null);
   const [clusters, setClusters] = useState<Cluster[] | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const [viewing, setViewing] = useState<Profile | null>(null);
+  const [viewingClips, setViewingClips] = useState<ProfileClip[] | null>(null);
 
   const [promote, setPromote] = useState<Cluster | null>(null);
   const [promoteName, setPromoteName] = useState("");
@@ -67,6 +77,18 @@ export default function Speakers() {
     setClusters(c.items);
   }
   useEffect(() => { load().catch((e) => toast.error(String(e))); }, []);
+
+  async function viewClips(p: Profile) {
+    setViewing(p);
+    setViewingClips(null);
+    try {
+      const res = await api.speakerClips(p.id);
+      setViewingClips(res.items);
+    } catch (e) {
+      toast.error("Could not load clips", { description: String((e as Error).message) });
+      setViewing(null);
+    }
+  }
 
   // one montage at a time — two voices overlapping is exactly what makes a cluster
   // unrecognisable, which is the problem this feature exists to solve
@@ -174,8 +196,8 @@ export default function Speakers() {
             const tone = statusTone(p.status);
             const low = p.intra_cohesion != null && p.intra_cohesion < 0.55;
             return (
-              <article key={p.id} className="blueprint"
-                       style={{ padding: 15, display: "flex", flexDirection: "column", gap: 11 }}>
+              <article key={p.id} className="blueprint row-hover" onClick={() => viewClips(p)}
+                       style={{ padding: 15, display: "flex", flexDirection: "column", gap: 11, cursor: "pointer" }}>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
                   <span style={{ fontFamily: "var(--font-heading)", fontSize: 20, lineHeight: 1.1 }}>
                     {p.display_name}
@@ -208,7 +230,11 @@ export default function Speakers() {
                 </p>
                 <div style={{ display: "flex", gap: 6, marginTop: "auto" }}>
                   <button className="btn btn-secondary" style={{ flex: 1, fontSize: 12, padding: 5 }}
-                          onClick={() => { setKeepId(p.id); setAbsorbId(""); setMerging(true); }}>
+                          onClick={(e) => { e.stopPropagation(); viewClips(p); }}>
+                    View clips
+                  </button>
+                  <button className="btn btn-secondary" style={{ flex: 1, fontSize: 12, padding: 5 }}
+                          onClick={(e) => { e.stopPropagation(); setKeepId(p.id); setAbsorbId(""); setMerging(true); }}>
                     {low ? "Inspect and merge" : "Merge into another"}
                   </button>
                 </div>
@@ -224,11 +250,35 @@ export default function Speakers() {
       </section>
 
       <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-          <h4 style={{ margin: 0 }}>Unclaimed voices · {clusters?.length ?? 0}</h4>
-          <span style={{ fontSize: 12, color: muted(55) }}>
-            Audition the montage before you name anyone.
-          </span>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+            <h4 style={{ margin: 0 }}>Unclaimed voices · {clusters?.length ?? 0}</h4>
+            <span style={{ fontSize: 12, color: muted(55) }}>
+              Audition the montage before you name anyone.
+            </span>
+          </div>
+          {/* Clustering happens one segment at a time and can only compare against the
+              clusters that existed at that moment, so one person drifts across several.
+              This is the pass that puts them back together, with every voice in view. */}
+          <button
+            className="btn btn-secondary"
+            style={{ fontSize: 12, padding: "5px 10px", flex: "none" }}
+            disabled={busy || (clusters?.length ?? 0) < 2}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const r = await api.consolidateClusters();
+                toast.success(r.merged
+                  ? `Merged ${r.merged} duplicate voice${r.merged === 1 ? "" : "s"} · ${r.remaining} left`
+                  : "Nothing to merge — no two voices were close enough");
+                load();
+              } catch (e) {
+                toast.error("Could not consolidate", { description: String((e as Error).message) });
+              } finally { setBusy(false); }
+            }}
+          >
+            Merge duplicate voices
+          </button>
         </div>
         <div style={{ display: "flex", flexDirection: "column", borderTop: "1px solid var(--color-divider)" }}>
           {(clusters || []).map((c) => {
@@ -402,6 +452,56 @@ export default function Speakers() {
             {absorb ? `“${absorb.display_name}” disappears; every clip it named now names “${keep?.display_name}”.` : ""}
           </span>
         </div>
+      </Dialog>
+
+      <Dialog
+        open={viewing != null}
+        onClose={() => { setViewing(null); setViewingClips(null); }}
+        kicker="Speakers"
+        title={viewing ? `Clips featuring ${viewing.display_name}` : ""}
+        subject={viewingClips ? `${viewingClips.length} clip${viewingClips.length === 1 ? "" : "s"}` : "loading…"}
+        cancel="Close"
+        width="620px"
+      >
+        {!viewingClips && (
+          <p style={{ margin: 0, fontSize: 14, color: muted(60) }}>Loading…</p>
+        )}
+        {viewingClips?.length === 0 && (
+          <p style={{ margin: 0, fontSize: 14, color: muted(60) }}>
+            No clips reference this profile yet.
+          </p>
+        )}
+        {viewingClips && viewingClips.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", borderTop: "1px solid var(--color-divider)" }}>
+            {viewingClips.map((c) => (
+              <div key={c.id} className="row-hover"
+                   onClick={() => navigate(`/clips/${c.id}`)}
+                   style={{
+                     display: "flex", alignItems: "center", justifyContent: "space-between",
+                     gap: 14, padding: "11px 4px", borderBottom: `1px solid ${muted(8)}`, cursor: "pointer",
+                   }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                  <span style={{
+                    fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                  }}>
+                    {c.filename}
+                  </span>
+                  <span className="mono" style={{ fontSize: 11, color: muted(50) }}>
+                    {new Date(c.created_at).toLocaleString()} · {fmtDur(c.duration_s)}
+                    {c.talk_share != null && ` · ${Math.round(c.talk_share * 100)}% talk share`}
+                  </span>
+                </div>
+                <span className="tag mono" style={{
+                  fontSize: 10, flex: "none",
+                  border: `1px solid ${c.match_result === "confident" ? "var(--color-accent)" : "var(--color-neutral-300)"}`,
+                  color: c.match_result === "confident" ? "var(--color-accent-700)" : muted(55),
+                }}>
+                  {c.match_result || "unknown"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </Dialog>
     </div>
   );

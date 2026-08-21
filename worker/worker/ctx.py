@@ -13,6 +13,9 @@ class SpeakerResult:
     n_segments_used: int = 0
     reliability: float = 0.0
     reliability_reason: str | None = None
+    # Agreement between embeddings of two disjoint halves of this label's audio. Low means
+    # the label probably holds more than one voice (stages/embed.py SPLIT_HALF_SUSPECT).
+    split_half_sim: float | None = None
     profile_id: str | None = None
     cluster_id: str | None = None
     match_score: float | None = None
@@ -20,6 +23,8 @@ class SpeakerResult:
     match_result: str = "unknown"
     runner_up_id: str | None = None
     runner_up_score: float | None = None
+    # AS-Norm score from common/speaker.py identify(), kept for failure analysis.
+    match_z: float | None = None
     talk_share: float | None = None
     longest_turn_s: float | None = None
     interruptions: int | None = None

@@ -14,8 +14,8 @@
       .\scripts\dev.ps1 web       # vite on :5174
 
   First run only:
-      uv venv --python 3.11 .venv;        $env:VIRTUAL_ENV=".venv";        uv pip install -r api/pyproject.toml
-      uv venv --python 3.11 .venv-worker; $env:VIRTUAL_ENV=".venv-worker"; uv pip install -r worker/pyproject.toml
+      uv venv --python 3.11 .venv;        $env:VIRTUAL_ENV=".venv";        uv pip install -r pyproject.toml --extra api
+      uv venv --python 3.11 .venv-worker; $env:VIRTUAL_ENV=".venv-worker"; uv pip install -r pyproject.toml --extra worker
       cd web; npm install; cd ..
 
   Python 3.11 is not optional: torch 2.4 and numpy 1.26 publish no 3.13 wheels.

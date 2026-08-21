@@ -1,0 +1,50 @@
+[project]
+name = "workbench"
+version = "0.1.0"
+requires-python = ">=3.11"
+# Shared by api and worker (both import common/). Split further below because the two
+# processes run in separate venvs — worker/.venv needs a CUDA build of torch that the
+# api's CPU-only global interpreter must not get (see start.ps1) — so installs still
+# target one extra or the other, never the bare dependency list.
+dependencies = [
+  "arq==0.26.*",
+  "asyncpg==0.30.*",
+  "pgvector==0.3.*",
+  "pydantic-settings==2.*",
+  "structlog==24.*",
+  "numpy==1.26.*",
+  "torch==2.4.*",
+  "sentence-transformers==3.*",
+  # common/graph.py imports this lazily, but both api (admin sync endpoint) and worker
+  # (auto-sync after a clip/radio-call completes, see worker/worker/pipeline.py) call it
+  "neo4j==5.*",
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi==0.115.*",
+  "uvicorn[standard]==0.32.*",
+  "redis==5.*",
+  "python-multipart==0.0.*",
+  "websockets==13.*",
+  "prometheus-client==0.21.*",
+  "httpx==0.27.*",
+  "anthropic==1.0.*",  # services/agent.py: AsyncAnthropic + beta_async_tool
+]
+worker = [
+  "scipy==1.13.*",
+  "soundfile==0.12.*",
+  "librosa==0.10.*",
+  "pyloudnorm==0.1.*",
+  "noisereduce==3.*",
+  "torchaudio==2.4.*",  # must match torch's CUDA build; silero-vad pulls torchaudio unpinned otherwise
+  "silero-vad==6.2.*",
+  "faster-whisper==1.0.*",
+  "pyannote.audio==3.1.*",
+  "speechbrain==1.0.*",
+  "huggingface_hub==0.25.*",
+  "pyyaml==6.*",
+]
+
+[tool.uv]
+package = false

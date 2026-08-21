@@ -20,8 +20,13 @@ import asyncio
 import uuid
 from typing import NamedTuple
 
+import structlog
+
 from . import db, entities, graph
 from .config import get_settings, get_effective_settings
+from .graph import GraphUnavailable
+
+log = structlog.get_logger(__name__)
 
 
 class Projection(NamedTuple):
@@ -482,6 +487,26 @@ async def rebuild(cfg=None) -> dict:
             MENTION_CYPHER[entity_type], rows)
 
     return counts
+
+
+async def resync() -> None:
+    """Best-effort rebuild after a mutation that changes graph identity: a speaker
+    rename/merge/delete, or a clip/race delete. Without this the graph keeps citing a
+    name or an id a human just explicitly corrected or removed, and stays wrong until
+    the next clip completes or someone hits the admin sync button.
+
+    Same posture as worker/pipeline.py's _sync_graph: Neo4j is a derived read model
+    (GRAPH_RAG_PLAN.md), so a down or slow graph must never fail the request that
+    triggered this."""
+    cfg = await get_effective_settings()
+    if not cfg.graph_enabled:
+        return
+    try:
+        await rebuild(cfg)
+    except GraphUnavailable:
+        pass
+    except Exception as e:
+        log.warning("graph_resync_failed", error=str(e)[:200])
 
 
 async def summary() -> dict:

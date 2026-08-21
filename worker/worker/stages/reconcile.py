@@ -9,20 +9,41 @@ def nearest_turn_label(w, turns):
 
 
 def assign_words(words, turns):
+    """Give every word to the turn it overlaps most, and record whether that turn was
+    flagged as overlapping speech.
+
+    Walks turns with a moving window instead of restarting the scan at turn 0 for every
+    word. Both lists are in time order, so once a turn ends before the current word starts
+    it cannot overlap this word or any later one — the old loop re-scanned from the
+    beginning each time and only broke out at the far edge, which is O(words x turns) and
+    turns into tens of millions of comparisons on an hour-long clip.
+
+    `in_overlap` is the diarizer's own cross-talk flag, carried down to the word so it can
+    reach the transcript. It was computed per turn and used to keep overlapped audio out
+    of fingerprints, then thrown away — nothing downstream could tell an attribution made
+    over clean speech from one made over two people talking at once.
+    """
+    n = len(turns)
+    lo = 0
     for w in words:
-        best, best_ov = None, 0.0
-        for t in turns:
-            if t["start"] >= w["end"]:
-                break
+        while lo < n and turns[lo]["end"] <= w["start"]:
+            lo += 1
+        best, best_ov, best_overlap = None, 0.0, False
+        j = lo
+        while j < n and turns[j]["start"] < w["end"]:
+            t = turns[j]
             ov = min(w["end"], t["end"]) - max(w["start"], t["start"])
             if ov > best_ov:
-                best, best_ov = t["label"], ov
+                best, best_ov, best_overlap = t["label"], ov, bool(t.get("is_overlap"))
+            j += 1
         dur = max(w["end"] - w["start"], 1e-6)
         if best is None:
             best = nearest_turn_label(w, turns)
             w["speaker_conf"] = 0.0
+            w["in_overlap"] = False
         else:
             w["speaker_conf"] = min(1.0, best_ov / dur)
+            w["in_overlap"] = best_overlap
         w["local_label"] = best
         w["smoothed"] = False
 
@@ -40,7 +61,10 @@ def finalize(u):
     ws = u["words"]
     return {**u, "end": ws[-1]["end"], "text": " ".join(w["word"] for w in ws).strip(),
             "mean_word_conf": float(np.mean([w["probability"] for w in ws])),
-            "mean_speaker_conf": float(np.mean([w["speaker_conf"] for w in ws]))}
+            "mean_speaker_conf": float(np.mean([w["speaker_conf"] for w in ws])),
+            # share of this utterance spoken over someone else — the honest caveat on its
+            # speaker attribution, which a confidence number alone does not convey
+            "overlap_ratio": float(np.mean([bool(w.get("in_overlap")) for w in ws]))}
 
 
 def regroup(words):
@@ -80,18 +104,27 @@ async def run(ctx):
         "language": ctx.language, "language_conf": ctx.language_conf, "text": full_text,
     })
 
+    word_rows = []
     for u in ctx.utterances:
         uid = await db.insert("utterances", {
             "transcript_id": ctx.transcript_id, "clip_id": ctx.clip_id, "idx": u["idx"],
             "start_s": u["start"], "end_s": u["end"], "local_label": u["local_label"],
             "text": u["text"], "mean_word_conf": u["mean_word_conf"],
-            "mean_speaker_conf": u["mean_speaker_conf"],
+            "mean_speaker_conf": u["mean_speaker_conf"], "overlap_ratio": u["overlap_ratio"],
         })
         u["id"] = uid
-        for wi, w in enumerate(u["words"]):
-            await db.execute(
-                """INSERT INTO words (utterance_id, clip_id, idx, word, start_s, end_s,
-                       probability, local_label, speaker_conf, smoothed)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
-                uid, ctx.clip_id, wi, w["word"], w["start"], w["end"],
-                w["probability"], w["local_label"], w["speaker_conf"], w["smoothed"])
+        word_rows.extend(
+            (uid, ctx.clip_id, wi, w["word"], w["start"], w["end"],
+             w["probability"], w["local_label"], w["speaker_conf"], w["smoothed"])
+            for wi, w in enumerate(u["words"]))
+
+    # Words are the highest-cardinality table in the pipeline — an hour of speech is
+    # ~10k rows, and inserting them one await at a time was ~10k sequential round trips,
+    # by far the slowest thing in this stage. The utterance inserts stay individual
+    # because each one's generated id is needed to attach its words.
+    if word_rows:
+        await db.pool().executemany(
+            """INSERT INTO words (utterance_id, clip_id, idx, word, start_s, end_s,
+                   probability, local_label, speaker_conf, smoothed)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+            word_rows)

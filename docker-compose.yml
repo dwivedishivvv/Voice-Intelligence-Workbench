@@ -3,7 +3,6 @@ name: speaker-workbench
 
 x-common: &common
   restart: unless-stopped
-  env_file: .env
 
 services:
   postgres:

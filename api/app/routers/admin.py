@@ -175,6 +175,22 @@ async def calibrate(user=Depends(get_current_user)):
     return await sc.calibrate()
 
 
+@router.post("/clusters/consolidate")
+async def consolidate_clusters(user=Depends(get_current_user)):
+    """Merge unclaimed voice clusters that are the same person.
+
+    assign_cluster() can only compare a new segment against the clusters that existed at
+    that moment, so one voice reliably ends up spread across several and nothing puts them
+    back together. This is the pass that does, with every centroid in view at once.
+    Explicit rather than automatic: it rewrites which cluster a past segment belongs to,
+    which is a decision worth a person pressing a button for.
+    """
+    cfg = await get_effective_settings()
+    result = await sc.consolidate_clusters(cfg)
+    await audit("cluster.consolidate", "speaker_cluster", "all", after=result, actor=user)
+    return result
+
+
 @router.get("/calibration/latest")
 async def latest_calibration(user=Depends(get_current_user)):
     row = await db.fetchrow("SELECT * FROM calibration_runs ORDER BY ran_at DESC LIMIT 1")

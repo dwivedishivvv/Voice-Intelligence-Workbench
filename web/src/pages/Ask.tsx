@@ -196,6 +196,7 @@ export default function Ask() {
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const bottomRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const active = threads.find((t) => t.id === activeId) || null;
 
@@ -232,7 +233,9 @@ export default function Ask() {
     cardRefs.current.get(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
-  async function ask(q: string) {
+  // historyOverride lets regenerate() ask the same question again against the turns
+  // *before* the one being replaced, without waiting on a state update to land first.
+  async function ask(q: string, historyOverride?: { question: string; answer: string }[]) {
     if (!q.trim() || busy) return;
     setBusy(true);
     setActivity([]);
@@ -249,9 +252,13 @@ export default function Ask() {
       setActivity((prev) => [...prev, TOOL_LABEL[msg.tool] || msg.tool]);
     };
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const history = active?.turns.map((t) => ({ question: t.question, answer: t.answer })) ?? null;
-      const res = await api.agentAsk(q, history, conversationId);
+      const history = historyOverride
+        ?? active?.turns.map((t) => ({ question: t.question, answer: t.answer })) ?? null;
+      const res = await api.agentAsk(q, history, conversationId, controller.signal);
       const turn: Turn = { question: q, ...res };
       setThreads((prev) => {
         if (active) {
@@ -267,15 +274,39 @@ export default function Ask() {
       });
       setQuestion("");
     } catch (err) {
-      const detail = String(err);
-      if (detail.includes("disabled") || detail.includes("not set")) setDisabled(detail);
-      else toast.error("Could not answer", { description: detail });
+      if (controller.signal.aborted) {
+        toast("Stopped", { description: "The in-flight question was cancelled." });
+      } else {
+        const detail = String(err);
+        if (detail.includes("disabled") || detail.includes("not set")) setDisabled(detail);
+        else toast.error("Could not answer", { description: detail });
+      }
     } finally {
       ws.close();
       wsRef.current = null;
+      abortRef.current = null;
       setBusy(false);
       setActivity([]);
     }
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+    wsRef.current?.close();
+  }
+
+  function regenerate() {
+    if (!active || busy || active.turns.length === 0) return;
+    const last = active.turns[active.turns.length - 1];
+    const history = active.turns.slice(0, -1).map((t) => ({ question: t.question, answer: t.answer }));
+    setThreads((prev) => prev.map((t) => t.id === active.id ? { ...t, turns: t.turns.slice(0, -1) } : t));
+    ask(last.question, history);
+  }
+
+  function copyAnswer(text: string) {
+    navigator.clipboard.writeText(text).then(
+      () => toast.success("Copied"),
+      () => toast.error("Could not copy"));
   }
 
   // ── sidebar: thread history replaces the nav while Ask is open ──────────
@@ -361,7 +392,7 @@ export default function Ask() {
 
   const composer = (
     <>
-      <div className="blueprint" style={{ padding: "10px 12px", display: "flex", alignItems: "flex-end", gap: 10 }}>
+      <div className="blueprint" style={{ padding: "10px 12px", display: "flex", alignItems: "center", gap: 10 }}>
         <textarea
           className="input"
           rows={2}
@@ -379,9 +410,16 @@ export default function Ask() {
             padding: "2px 0", fontSize: 15, lineHeight: 1.5, minHeight: 0,
           }}
         />
-        <button className="btn btn-primary" style={{ flex: "none" }}
-                disabled={busy || !question.trim()} onClick={() => ask(question)}>
-          {busy ? "Asking…" : "Ask"}
+        <button
+          className="btn btn-primary"
+          style={{
+            flex: "none", alignSelf: "center", height: 38, minWidth: 76,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+          disabled={!busy && !question.trim()}
+          onClick={() => (busy ? stop() : ask(question))}
+        >
+          {busy ? "Stop" : "Ask"}
         </button>
       </div>
       <span className="mono" style={{ fontSize: 11, color: muted(45) }}>
@@ -419,6 +457,10 @@ export default function Ask() {
             buttons are just furniture on an empty screen. */}
         {active && (
           <div style={{ display: "flex", gap: 6, flex: "none" }}>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
+                    disabled={busy || active.turns.length === 0} onClick={regenerate}>
+              Regenerate
+            </button>
             <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}
                     onClick={() => { setRenameDraft(active.title); setRenaming(true); }}>
               Rename
@@ -556,7 +598,7 @@ export default function Ask() {
 
               <div className="mono" style={{
                 display: "flex", gap: 16, paddingTop: 12, borderTop: "1px solid var(--color-divider)",
-                fontSize: 11, color: muted(50), flexWrap: "wrap",
+                fontSize: 11, color: muted(50), flexWrap: "wrap", alignItems: "center",
               }}>
                 {turn.tools_used?.length > 0 && <span>tools: {turn.tools_used.join(", ")}</span>}
                 <span>model: {turn.provider}/{turn.model}</span>
@@ -564,6 +606,12 @@ export default function Ask() {
                   <span>
                     {turn.usage.input_tokens.toLocaleString()} in / {turn.usage.output_tokens.toLocaleString()} out
                   </span>
+                )}
+                {turn.answer && (
+                  <button className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}
+                          onClick={() => copyAnswer(turn.answer)}>
+                    Copy
+                  </button>
                 )}
               </div>
             </div>
