@@ -3,7 +3,10 @@ import { Link } from "react-router-dom";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { useTheme } from "@/lib/theme";
-import { muted, ACCENT, GREEN, AMBER, AMBER_INK, VOICE_A, VOICE_B } from "@/lib/ui";
+import {
+  muted, ACCENT, GREEN, AMBER, AMBER_INK, VOICE_A, VOICE_B,
+  MOOD_COLOR, MOOD_PCT, SENTIMENT_COLOR, type Mood,
+} from "@/lib/ui";
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -43,6 +46,18 @@ const OUTCOMES = [
   { t: "Suggested", d: "A plausible match, drawn italic, waiting on you.", c: VOICE_B, hatch: false },
   { t: "Unknown", d: "Judged — and nobody in the corpus matches.", c: "var(--color-neutral-600)", hatch: false },
   { t: "Abstained", d: "Declined to judge. Drawn hatched, never as a result.", c: AMBER, hatch: true },
+];
+
+const MOODS: { k: Mood; d: string }[] = [
+  { k: "calm", d: "Baseline — steady pace, level tone." },
+  { k: "tired", d: "Flattened energy, slower cadence." },
+  { k: "stressed", d: "Elevated pitch and pace, tension in the voice." },
+];
+
+const SENTIMENTS = [
+  { t: "Positive", k: "positive" as const, d: "Text reads favourably, and the acoustic signal agrees." },
+  { t: "Negative", k: "negative" as const, d: "Text reads unfavourably, and the acoustic signal agrees." },
+  { t: "Neutral", k: "neutral" as const, d: "No strong lean either way." },
 ];
 
 const STATS = [
@@ -249,6 +264,8 @@ export default function Landing() {
         </div>
 
         <div className="lp-wrap" style={{ position: "relative", zIndex: 1 }}>
+          <div className="lp-checker lp-hero-fade" style={{ marginBottom: 22 }} aria-hidden />
+
           <div className="lp-hero-fade" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 22 }}>
             <span className="lp-dot" />
             <span className="kicker">On-premises · nothing leaves the box</span>
@@ -273,7 +290,7 @@ export default function Landing() {
           </div>
 
           <div className="lp-hero-fade" style={{
-            marginTop: 56, display: "grid", gap: 1, gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+            marginTop: 56, display: "grid", gap: 1, gridTemplateColumns: "repeat(auto-fit, minmax(min(160px, 100%), 1fr))",
             background: "var(--color-divider)", border: "1px solid var(--color-divider)",
           }}>
             {STATS.map((s) => (
@@ -292,7 +309,7 @@ export default function Landing() {
           <div className="lp-marquee-track" key={k} aria-hidden={k === 1}>
             {STAGES.map((s) => (
               <span key={s.name}>
-                <b>◆</b>&nbsp;&nbsp;{s.name}&nbsp;&nbsp;
+                <b aria-hidden>🏁</b>&nbsp;&nbsp;{s.name}&nbsp;&nbsp;
                 <span style={{ opacity: 0.55 }}>{s.metric}</span>
               </span>
             ))}
@@ -314,7 +331,7 @@ export default function Landing() {
             </p>
           </div>
 
-          <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(268px, 1fr))" }}>
+          <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(min(268px, 100%), 1fr))" }}>
             {FEATURES.map((f, i) => (
               <article key={f.t} className="lp-card lp-reveal" onMouseMove={glow}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
@@ -330,7 +347,7 @@ export default function Landing() {
       </section>
 
       {/* ── pipeline (pinned, scroll-scrubbed) ── */}
-      <section id="pipeline" className="lp-pipeline" style={{ padding: "80px 0 0", scrollMarginTop: 0 }}>
+      <section id="pipeline" className="lp-pipeline" style={{ padding: "80px 0 0", scrollMarginTop: 80 }}>
         <div className="lp-pipeline-inner" style={{
           minHeight: "100svh", display: "flex", alignItems: "center", overflow: "hidden",
         }}>
@@ -391,7 +408,7 @@ export default function Landing() {
       {/* ── journey (horizontal) ── */}
       <section id="journey" className="lp-journey" style={{
         minHeight: "100svh", display: "flex", flexDirection: "column",
-        justifyContent: "center", overflow: "hidden", paddingBlock: 90,
+        justifyContent: "center", overflow: "hidden", paddingBlock: 90, scrollMarginTop: 80,
       }}>
         <div className="lp-wrap" style={{ marginBottom: 40 }}>
           <span className="kicker">§ 03 — The journey</span>
@@ -427,7 +444,7 @@ export default function Landing() {
               mistaken for an answer.
             </p>
           </div>
-          <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+          <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(min(220px, 100%), 1fr))" }}>
             {OUTCOMES.map((o) => (
               <div key={o.t} className="lp-reveal" style={{
                 border: "1px solid var(--color-divider)", padding: "20px 20px 24px", background: "var(--color-bg)",
@@ -441,14 +458,68 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* ── sentiment & tone ── */}
+      <section style={{ padding: "0 0 110px" }}>
+        <div className="lp-wrap">
+          <div className="lp-reveal" style={{ display: "flex", gap: 40, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 40 }}>
+            <div style={{ flex: "1 1 440px" }}>
+              <span className="kicker">§ 05 — Reading the room</span>
+              <h2 className="lp-h2" style={{ marginTop: 10 }}>Two signals.<br />Fused, not averaged.</h2>
+            </div>
+            <p className="lp-lede" style={{ flex: "1 1 360px", color: muted(66), margin: 0 }}>
+              Multilingual XLM-R reads the words; an acoustic model reads the voice underneath them.
+              Both are stored per utterance and rolled up per speaker — so a flat transcript and a
+              tense delivery are never collapsed into one number.
+            </p>
+          </div>
+
+          <div style={{ display: "grid", gap: 34, gridTemplateColumns: "repeat(auto-fit, minmax(min(320px, 100%), 1fr))" }}>
+            <div className="lp-card lp-reveal" onMouseMove={glow}>
+              <span className="lp-idx">Acoustic — tone</span>
+              <h3 style={{ fontSize: 20, margin: "12px 0 16px", textTransform: "uppercase" }}>How it was said</h3>
+              <div style={{ display: "grid", gap: 16 }}>
+                {MOODS.map((m) => (
+                  <div key={m.k}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+                      <span style={{ textTransform: "capitalize", color: MOOD_COLOR[m.k] }}>{m.k}</span>
+                      <span className="mono" style={{ fontSize: 11, color: muted(45) }}>{MOOD_PCT[m.k]}</span>
+                    </div>
+                    <div className="bar"><span style={{ width: MOOD_PCT[m.k], background: MOOD_COLOR[m.k] }} /></div>
+                    <p style={{ margin: "6px 0 0", fontSize: 12, color: muted(58) }}>{m.d}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="lp-card lp-reveal" onMouseMove={glow}>
+              <span className="lp-idx">Text — sentiment</span>
+              <h3 style={{ fontSize: 20, margin: "12px 0 16px", textTransform: "uppercase" }}>What was said</h3>
+              <div style={{ display: "grid", gap: 14 }}>
+                {SENTIMENTS.map((s) => (
+                  <div key={s.k} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                    <span style={{ width: 8, height: 8, marginTop: 5, flex: "none", background: SENTIMENT_COLOR[s.k] }} />
+                    <div>
+                      <div style={{ fontSize: 14, color: SENTIMENT_COLOR[s.k] }}>{s.t}</div>
+                      <p style={{ margin: "2px 0 0", fontSize: 12, color: muted(58) }}>{s.d}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="hr" style={{ margin: "18px 0 12px" }} />
+              <span className="mono" style={{ fontSize: 11, color: muted(45) }}>a disagreement between the two is surfaced, not hidden</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ── offline ── */}
       <section style={{ padding: "0 0 110px" }}>
         <div className="lp-wrap">
           <div className="blueprint lp-reveal" style={{ padding: "clamp(28px,5vw,64px)", background: "var(--color-surface)" }}>
             <Corners />
-            <div style={{ display: "grid", gap: 40, gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", alignItems: "center" }}>
+            <div style={{ display: "grid", gap: 40, gridTemplateColumns: "repeat(auto-fit, minmax(min(300px, 100%), 1fr))", alignItems: "center" }}>
               <div>
-                <span className="kicker">§ 05 — Air-gapped by default</span>
+                <span className="kicker">§ 06 — Air-gapped by default</span>
                 <h2 className="lp-h2" style={{ marginTop: 10, fontSize: "clamp(28px,3.6vw,50px)" }}>HF_HUB_OFFLINE=1</h2>
                 <p style={{ color: muted(70), marginTop: 14, maxWidth: "48ch" }}>
                   Models are read from <span className="mono">MODEL_DIR</span> on disk. The core pipeline makes no
@@ -481,6 +552,7 @@ export default function Landing() {
       {/* ── footer cta ── */}
       <footer style={{ borderTop: "1px solid var(--color-divider)", padding: "90px 0 44px", position: "relative", overflow: "hidden" }}>
         <div className="lp-wrap" style={{ position: "relative", zIndex: 1 }}>
+          <div className="lp-checker lp-reveal" style={{ marginBottom: 22, maxWidth: 220 }} aria-hidden />
           <h2 className="lp-h1 lp-reveal" style={{ fontSize: "clamp(40px,8vw,116px)" }}>Start listening.</h2>
           <div className="lp-reveal" style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 30 }}>
             <Magnetic><Link className="btn btn-primary" to="/upload" style={{ padding: "12px 24px", fontSize: 15 }}>Upload a clip</Link></Magnetic>

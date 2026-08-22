@@ -6,7 +6,7 @@
   --color-bg: #f2f2f3;
   --color-surface: #e9e9ea;
   --color-text: #1d1f20;
-  --color-accent: #5980a6;
+  --color-accent: #c62828;
   --color-accent-2: #728fab;
   --color-divider: color-mix(in srgb, #1d1f20 16%, transparent);
 
@@ -22,15 +22,15 @@
   --color-neutral-800: #424244;
   --color-neutral-900: #2b2b2d;
 
-  --color-accent-100: #eef6ff;
-  --color-accent-200: #d6ebff;
-  --color-accent-300: #b5d9fd;
-  --color-accent-400: #94bce3;
-  --color-accent-500: #749dc4;
-  --color-accent-600: #597ea3;
-  --color-accent-700: #416180;
-  --color-accent-800: #2c455d;
-  --color-accent-900: #1d2d3d;
+  --color-accent-100: #fdecea;
+  --color-accent-200: #f9d0cb;
+  --color-accent-300: #f2a89e;
+  --color-accent-400: #e37e6d;
+  --color-accent-500: #d35847;
+  --color-accent-600: #c62828;
+  --color-accent-700: #9e2020;
+  --color-accent-800: #741810;
+  --color-accent-900: #4a0f0a;
 
   --color-accent-2-100: #eef6ff;
   --color-accent-2-200: #d6ebff;
@@ -88,16 +88,16 @@
   --color-neutral-700: #aab2b9;
   --color-neutral-800: #c6ccd1;
   --color-neutral-900: #e2e6e9;
-  --color-accent: #8fb4d8;
-  --color-accent-100: #1d2833;
-  --color-accent-200: #243342;
-  --color-accent-300: #3c556e;
-  --color-accent-400: #6d94ba;
-  --color-accent-500: #8fb4d8;
-  --color-accent-600: #a3c3e0;
-  --color-accent-700: #bcd4e9;
-  --color-accent-800: #d2e2f1;
-  --color-accent-900: #e8f0f8;
+  --color-accent: #ff6b5e;
+  --color-accent-100: #33130f;
+  --color-accent-200: #4a1913;
+  --color-accent-300: #742218;
+  --color-accent-400: #b03a26;
+  --color-accent-500: #e04c37;
+  --color-accent-600: #ff6b5e;
+  --color-accent-700: #ff9186;
+  --color-accent-800: #ffb5ac;
+  --color-accent-900: #ffdad5;
   --color-accent-2: #8fb4d8;
   --color-accent-2-300: #3c556e;
   --color-accent-2-700: #bcd4e9;
@@ -305,15 +305,18 @@ textarea.input { min-height: 90px; resize: vertical; }
 /* — top bar — */
 .lp-nav {
   position: fixed; inset: 0 0 auto 0; z-index: 40;
-  display: flex; align-items: center; gap: 18px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
   padding: 14px var(--gut);
   border-bottom: 1px solid transparent;
   background: color-mix(in srgb, var(--color-bg) 0%, transparent);
   transition: background .35s ease, border-color .35s ease, backdrop-filter .35s ease;
 }
+@media (max-width: 420px) {
+  .lp-nav .btn { font-size: 12px; padding: 6px 10px; }
+}
 .lp-nav[data-stuck="1"] {
   background: color-mix(in srgb, var(--color-bg) 86%, transparent);
-  backdrop-filter: blur(9px); border-bottom-color: var(--color-divider);
+  -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); border-bottom-color: var(--color-divider);
 }
 .lp-nav a.lp-navlink { color: color-mix(in srgb, var(--color-text) 62%, transparent); font-size: 13px; }
 .lp-nav a.lp-navlink:hover { color: var(--color-text); }
@@ -381,6 +384,15 @@ textarea.input { min-height: 90px; resize: vertical; }
 .lp-dot { width: 6px; height: 6px; background: var(--color-accent); flex: none; }
 .lp-mag { display: inline-block; will-change: transform; }
 .lp-reveal { will-change: transform, opacity; }
+
+/* — checkered flag rule: start/finish line motif, drawn from theme ink so it
+   works unmodified in light and dark — no image asset. — */
+.lp-checker {
+  height: 12px; flex: none;
+  background-image: conic-gradient(var(--color-text) 25%, transparent 0 50%, var(--color-text) 0 75%, transparent 0);
+  background-size: 12px 12px;
+  opacity: 0.6;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .lp-reveal, .lp-line > span { transform: none !important; opacity: 1 !important; }
