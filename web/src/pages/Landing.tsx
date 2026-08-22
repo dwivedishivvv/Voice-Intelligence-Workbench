@@ -122,6 +122,71 @@ function Counter({ to, suffix }: { to: number; suffix: string }) {
   return <span ref={ref} className="lp-num">0{suffix}</span>;
 }
 
+/** The Neo4j graph projection — the real node/edge shape from common/graph_sync.py's
+ *  MERGE statements, trimmed to the core entities. Static and hand-laid-out rather than
+ *  force-simulated: the point is to show the actual schema legibly, not to demo physics. */
+const GRAPH_NODES: {
+  id: string; label: string; x: number; y: number; above: boolean; c: string; tag: string | null;
+}[] = [
+  { id: "session", label: "Session", x: 330, y: 40, above: false, c: VOICE_B, tag: null },
+  { id: "team", label: "Team", x: 540, y: 100, above: false, c: "var(--color-neutral-500)", tag: null },
+  { id: "driver", label: "Driver", x: 420, y: 160, above: true, c: ACCENT, tag: null },
+  { id: "speaker", label: "Speaker", x: 210, y: 160, above: true, c: VOICE_A, tag: null },
+  { id: "lap", label: "Lap", x: 420, y: 258, above: false, c: AMBER, tag: null },
+  { id: "utterance", label: "Utterance", x: 210, y: 258, above: false, c: "var(--color-neutral-500)", tag: "+ sentiment, mood" },
+  { id: "clip", label: "Clip", x: 70, y: 200, above: false, c: "var(--color-neutral-500)", tag: "+ sentiment, mood" },
+];
+const GRAPH_EDGES: [string, string, string][] = [
+  ["utterance", "speaker", "SPOKEN_BY"],
+  ["utterance", "clip", "IN_CLIP"],
+  ["driver", "speaker", "VOICE_OF"],
+  ["driver", "session", "DROVE_IN"],
+  ["driver", "team", "DRIVES_FOR"],
+  ["lap", "driver", "BY"],
+  ["lap", "session", "IN"],
+];
+const GRAPH_DOT = 6;
+
+function GraphDiagram() {
+  const at = (id: string) => GRAPH_NODES.find((n) => n.id === id)!;
+  return (
+    <svg viewBox="0 0 620 300" style={{ width: "100%", height: "auto" }} role="img"
+         aria-label="Graph schema: clips and utterances link to speakers; drivers link to speakers, teams, sessions and laps">
+      {GRAPH_EDGES.map(([a, b, label]) => {
+        const pa = at(a), pb = at(b);
+        const mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
+        return (
+          <g key={a + b}>
+            <line x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y}
+                  stroke="var(--color-divider)" strokeWidth={1.5} />
+            <text x={mx} y={my - 6} textAnchor="middle" className="mono"
+                  style={{ fontSize: 9, fill: "var(--color-text)", opacity: 0.4 }}>
+              {label}
+            </text>
+          </g>
+        );
+      })}
+      {GRAPH_NODES.map((n) => (
+        <g key={n.id}>
+          <circle cx={n.x} cy={n.y} r={GRAPH_DOT} fill={n.c} />
+          <text x={n.x} y={n.above ? n.y - GRAPH_DOT - 8 : n.y + GRAPH_DOT + 15} textAnchor="middle" style={{
+            fontFamily: "var(--font-heading)", fontSize: 13, textTransform: "uppercase",
+            fill: n.c, letterSpacing: "0.02em",
+          }}>
+            {n.label}
+          </text>
+          {n.tag && (
+            <text x={n.x} y={n.y + GRAPH_DOT + 29} textAnchor="middle" className="mono"
+                  style={{ fontSize: 9, fill: ACCENT, opacity: 0.9 }}>
+              {n.tag}
+            </text>
+          )}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 /** Cursor-tracked glow on the blueprint cards. */
 function useCardGlow() {
   return (e: React.MouseEvent<HTMLElement>) => {
@@ -512,6 +577,34 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* ── graph projection ── */}
+      <section style={{ padding: "0 0 110px" }}>
+        <div className="lp-wrap">
+          <div style={{ marginBottom: 34 }}>
+            <span className="kicker">§ 06 — The graph, not just the table</span>
+            <h2 className="lp-h2" style={{ marginTop: 10 }}>Every entity,<br />one hop from its mood.</h2>
+          </div>
+
+          <div className="blueprint lp-reveal" style={{ padding: "clamp(24px,4vw,40px)", background: "var(--color-surface)" }}>
+            <Corners />
+            <p style={{ color: muted(70), margin: 0, maxWidth: "72ch" }}>
+              An optional Neo4j projection, rebuilt from Postgres and never authoritative — turn
+              it off and search, the pipeline and every page carry on unchanged. What it buys: a
+              clip and every utterance in it carry their fused sentiment and mood as graph
+              properties, so one traversal can walk an entity <em>and</em> filter by emotional
+              read at the same time — <span className="mono" style={{ fontSize: 13, color: ACCENT }}>
+              "every stressed utterance mentioning the car this session"</span> is one graph
+              traversal, not a join across five tables.
+            </p>
+            <div className="hr" style={{ marginBlock: 26 }} />
+            <div className="lp-card" onMouseMove={glow}
+                 style={{ maxWidth: 820, marginInline: "auto", width: "100%", border: "none", background: "transparent" }}>
+              <GraphDiagram />
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ── offline ── */}
       <section style={{ padding: "0 0 110px" }}>
         <div className="lp-wrap">
@@ -519,7 +612,7 @@ export default function Landing() {
             <Corners />
             <div style={{ display: "grid", gap: 40, gridTemplateColumns: "repeat(auto-fit, minmax(min(300px, 100%), 1fr))", alignItems: "center" }}>
               <div>
-                <span className="kicker">§ 06 — Air-gapped by default</span>
+                <span className="kicker">§ 07 — Air-gapped by default</span>
                 <h2 className="lp-h2" style={{ marginTop: 10, fontSize: "clamp(28px,3.6vw,50px)" }}>HF_HUB_OFFLINE=1</h2>
                 <p style={{ color: muted(70), marginTop: 14, maxWidth: "48ch" }}>
                   Models are read from <span className="mono">MODEL_DIR</span> on disk. The core pipeline makes no

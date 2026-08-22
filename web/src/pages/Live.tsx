@@ -52,11 +52,18 @@ const TOOLS: [string, "local" | "off-box"][] = [
   ["store_session", "local"],
   ["search_corpus", "local"],
   ["compose_answer", "off-box"],
+  ["lap_analysis", "off-box"],
 ];
 
 function fmtElapsed(ms: number) {
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`;
+}
+
+// Tenths matter for a lap split in a way they don't for the session clock.
+function fmtLap(ms: number) {
+  const s = ms / 1000;
+  return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 }
 
 // The fused (text-dominant) sentiment decides what's worth flagging, not raw acoustic
@@ -73,9 +80,12 @@ export default function Live() {
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [chunks, setChunks] = useState<Chunk[]>([]);
-  const [feedTab, setFeedTab] = useState<"live" | "grouped">("live");
+  const [feedTab, setFeedTab] = useState<"live" | "grouped" | "analysis">("live");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [startedAt, setStartedAt] = useState<Date | null>(null);
+  const [laps, setLaps] = useState<{ n: number; t: number; split: number }[]>([]);
+  type LapAnalysis = { status: "pending" | "done" | "error"; text?: string; detail?: string | null };
+  const [lapAnalyses, setLapAnalyses] = useState<Record<number, LapAnalysis>>({});
   const [source, setSource] = useState<Source>("mic");
   const [f1Mode, setF1Mode] = useState<"url" | "file">("file");
   const [f1Url, setF1Url] = useState("");
@@ -228,6 +238,8 @@ export default function Live() {
     setChunks([]);
     setElapsedMs(0);
     setStartedAt(new Date());
+    setLaps([]);
+    setLapAnalyses({});
 
     const audioCtx = new AudioContext();
     const analyser = audioCtx.createAnalyser();
@@ -294,6 +306,65 @@ export default function Live() {
     }
     setRecording(false);
     setSpeaking(false);
+  }
+
+  // Off-box, like Ask: the same /v1/agent/ask endpoint, with the lap's own timing and the
+  // radio chatter transcribed during it folded straight into the question text rather than
+  // left for the agent's corpus-search tools to find — a live session isn't indexed yet, so
+  // there is nothing for those tools to search until the clip is processed after the fact.
+  async function analyzeLap(lap: { n: number; t: number; split: number }, prevLaps: typeof laps) {
+    setLapAnalyses((prev) => ({ ...prev, [lap.n]: { status: "pending" } }));
+    const splits = prevLaps.map((l) => l.split);
+    const best = splits.length ? Math.min(...splits) : null;
+    const worst = splits.length ? Math.max(...splits) : null;
+    const windowStart = prevLaps[prevLaps.length - 1]?.t ?? 0;
+    const chatter = turns
+      .filter((t) => t.text && t.chunkT >= windowStart && t.chunkT <= lap.t)
+      .map((t) => t.text)
+      .join(" ")
+      .slice(0, 600);
+
+    const question = [
+      `Lap ${lap.n} just finished in ${fmtLap(lap.split)} (session clock ${fmtLap(lap.t)}).`,
+      prevLaps.length
+        ? `Prior laps this session: ${prevLaps.map((l) => `#${l.n} ${fmtLap(l.split)}`).join(", ")}. Fastest so far ${fmtLap(best!)}, slowest ${fmtLap(worst!)}.`
+        : "This is the first lap of the session — nothing to compare against yet.",
+      chatter ? `Radio chatter during the lap: "${chatter}"` : "No speech was transcribed during this lap.",
+      "In 2-3 short sentences: how does this lap compare to the others, and does the radio chatter explain anything about the pace?",
+    ].join(" ");
+
+    try {
+      const res = await api.agentAnalyze(question);
+      setLapAnalyses((prev) => ({
+        ...prev,
+        [lap.n]: res.refused
+          ? { status: "error", detail: "the agent returned an empty response" }
+          : { status: "done", text: res.text },
+      }));
+    } catch (e) {
+      setLapAnalyses((prev) => ({
+        ...prev, [lap.n]: { status: "error", detail: (e as Error).message || String(e) },
+      }));
+    }
+  }
+
+  // A stopwatch-style lap: a manual split on the session clock, independent of who is
+  // speaking or what the pipeline has transcribed. The split is measured against the
+  // previous lap's own mark, not the session start, so each entry reads as "how long was
+  // this lap" rather than a running total the operator has to subtract by hand.
+  function markLap() {
+    const t = performance.now() - sessionStartRef.current;
+    const prevLaps = laps;
+    const last = prevLaps[prevLaps.length - 1];
+    const lap = { n: prevLaps.length + 1, t, split: t - (last?.t ?? 0) };
+    setLaps((prev) => [...prev, lap]);
+    analyzeLap(lap, prevLaps).catch(() => {});
+  }
+
+  function retryLapAnalysis(n: number) {
+    const idx = laps.findIndex((l) => l.n === n);
+    if (idx < 0) return;
+    analyzeLap(laps[idx], laps.slice(0, idx)).catch(() => {});
   }
 
   async function toggle() {
@@ -441,6 +512,11 @@ export default function Live() {
               REC {fmtElapsed(elapsedMs)}
             </span>
           )}
+          {recording && (
+            <button className="btn btn-secondary" onClick={markLap}>
+              Lap {laps.length > 0 ? `· ${laps.length}` : ""}
+            </button>
+          )}
           <button className={recording ? "btn btn-secondary" : "btn btn-primary"}
                   disabled={!recording && !canStart}
                   onClick={toggle}>
@@ -524,6 +600,10 @@ export default function Live() {
             <label className="seg-opt">
               <input type="radio" name="feedTab" checked={feedTab === "grouped"} onChange={() => setFeedTab("grouped")} />
               Grouped
+            </label>
+            <label className="seg-opt">
+              <input type="radio" name="feedTab" checked={feedTab === "analysis"} onChange={() => setFeedTab("analysis")} />
+              Lap analysis{laps.length > 0 ? ` (${laps.length})` : ""}
             </label>
           </div>
 
@@ -735,6 +815,67 @@ export default function Live() {
             </div>
           )}
 
+          {feedTab === "analysis" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, borderTop: "1px solid var(--color-divider)", paddingTop: 14 }}>
+              {laps.length === 0 && (
+                <p style={{ padding: "10px 0", fontSize: 13, color: muted(55) }}>
+                  No laps yet. Press <strong>Lap</strong> during a live session to get a
+                  short AI comparison of each one against the rest of the session.
+                </p>
+              )}
+              {[...laps].reverse().map((l) => {
+                const prevSplits = laps.filter((x) => x.n < l.n).map((x) => x.split);
+                const best = prevSplits.length ? Math.min(...prevSplits) : null;
+                const delta = best != null ? l.split - best : null;
+                const a = lapAnalyses[l.n];
+                return (
+                  <section key={l.n} className="blueprint" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                      <span style={{ fontFamily: "var(--font-heading)", fontSize: 17, textTransform: "uppercase" }}>
+                        Lap {l.n}
+                      </span>
+                      <span className="mono" style={{ fontSize: 12.5, display: "flex", gap: 10, alignItems: "baseline" }}>
+                        <span style={{ color: "var(--color-text)" }}>{fmtLap(l.split)}</span>
+                        {delta != null && (
+                          <span style={{ color: delta <= 0 ? GREEN : delta < 1000 ? AMBER_INK : RED, fontSize: 11 }}>
+                            {delta <= 0 ? "fastest" : `+${fmtLap(delta)}`}
+                          </span>
+                        )}
+                        <span style={{ color: muted(45) }}>at {fmtLap(l.t)}</span>
+                      </span>
+                    </div>
+                    {!a && <span style={{ fontSize: 12.5, color: muted(50) }}>queued…</span>}
+                    {a?.status === "pending" && (
+                      <span className="mono" style={{ fontSize: 12.5, color: muted(55), display: "flex", alignItems: "center", gap: 6 }}>
+                        <span className="spin">◌</span> analyzing lap…
+                      </span>
+                    )}
+                    {a?.status === "error" && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 12.5, color: AMBER_INK }}>
+                          Couldn't analyze this lap{a.detail ? ` — ${a.detail}` : ""}.
+                        </span>
+                        <a href="#" style={{ fontSize: 12 }}
+                           onClick={(e) => { e.preventDefault(); retryLapAnalysis(l.n); }}>
+                          retry
+                        </a>
+                      </div>
+                    )}
+                    {a?.status === "done" && (
+                      <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6, color: "var(--color-text)" }}>
+                        {a.text}
+                      </p>
+                    )}
+                  </section>
+                );
+              })}
+              <p style={{ margin: 0, fontSize: 11, color: muted(50) }}>
+                Sent off-box to the configured LLM — the lap timing and any radio chatter
+                transcribed during it, nothing else from the session.
+              </p>
+            </div>
+          )}
+
           {chunks.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 12, paddingTop: 4 }}>
               <div style={{
@@ -822,6 +963,33 @@ export default function Live() {
               Chunks close at natural pauses, not on a timer, so lines do not split mid-sentence.
             </span>
           </div>
+
+          {laps.length > 0 && (() => {
+            const splits = laps.map((l) => l.split);
+            const fastest = Math.min(...splits), slowest = Math.max(...splits);
+            return (
+              <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 9 }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                  <span className="kicker-sm" style={{ color: muted(55) }}>Laps</span>
+                  <span className="mono" style={{ fontSize: 11, color: muted(45) }}>{laps.length}</span>
+                </div>
+                <div className="mono" style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto" }}>
+                  {[...laps].reverse().map((l) => (
+                    <div key={l.n} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
+                      <span style={{ color: muted(55) }}>Lap {l.n}</span>
+                      <span style={{
+                        color: laps.length > 1 && l.split === fastest ? GREEN
+                          : laps.length > 1 && l.split === slowest ? RED : "var(--color-text)",
+                      }}>
+                        {fmtLap(l.split)}
+                      </span>
+                      <span style={{ color: muted(40) }}>{fmtLap(l.t)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 10 }}>
             <span className="kicker-sm" style={{ color: muted(55) }}>Tone across the session</span>

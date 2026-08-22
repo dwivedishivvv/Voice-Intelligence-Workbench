@@ -13,6 +13,22 @@ from ..services import agent as agent_svc, graph_context
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
 
 
+class AnalyzeBody(BaseModel):
+    prompt: str
+
+
+@router.post("/analyze")
+async def analyze(body: AnalyzeBody, user=Depends(get_current_user)):
+    """A short, tool-less LLM note over text the caller already assembled — e.g. a live
+    session's lap timing plus the radio chatter transcribed during it. See
+    agent_svc.analyze's docstring for why this does not reuse /ask's corpus-QA agent."""
+    cfg = await get_effective_settings()
+    try:
+        return await agent_svc.analyze(body.prompt, cfg)
+    except agent_svc.LLMUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+
+
 class AskBody(BaseModel):
     question: str
     # Prior turns, verbatim from a previous response's `history`. The API is stateless by

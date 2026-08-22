@@ -482,6 +482,62 @@ answer — it is the one thing the reader cannot check. Every id behind what you
 describing goes in the text, however short the text is."""
 
 
+SYSTEM_ANALYZE = """You are a terse motorsport race engineer's assistant. You are given one \
+lap's timing from a live session, the prior lap splits, and — if any — team-radio chatter \
+transcribed during the lap. Give a short, concrete comparison of this lap to the others, and \
+say so if the chatter explains anything about the pace. Two to three sentences. No citations, \
+no caveats beyond what the data actually shows. If there is nothing to compare against yet, \
+say so plainly rather than inventing a comparison."""
+
+
+async def analyze(prompt: str, cfg=None) -> dict:
+    """One-shot, tool-less completion for a short operational note — e.g. a live lap
+    comparison. Deliberately NOT routed through answer()'s corpus-QA agent: that one is
+    instructed to always reach for its tools and never answer from general reasoning, which
+    is exactly wrong here — a live session has no corpus to search yet and no real OpenF1
+    session_key/driver_number for driver_timeline to look up. Observed failing in exactly
+    that way: the model called driver_timeline with the placeholder argument names
+    "session_key"/"driver_number" and echoed the tool's own "no lap data" error back as the
+    answer. This path skips tools and the corpus roster entirely, so there is nothing for
+    the model to reach for instead of just reasoning over what is in the prompt."""
+    cfg = cfg or await get_effective_settings()
+    if not cfg.llm_enabled:
+        raise LLMUnavailable("agent is disabled (set LLM_ENABLED=true)")
+
+    provider = (cfg.llm_provider or "anthropic").lower()
+    if provider not in DEFAULT_MODELS:
+        raise LLMUnavailable(f"unknown LLM_PROVIDER {provider!r}; "
+                             f"expected one of {', '.join(sorted(DEFAULT_MODELS))}")
+    model = cfg.llm_model or DEFAULT_MODELS[provider]
+    key = getattr(cfg, f"{provider}_api_key", "")
+    if not key:
+        raise LLMUnavailable(
+            f"no API key for {provider} — set one in Settings › Ask AI, "
+            f"or {provider.upper()}_API_KEY in .env")
+
+    if provider == "anthropic":
+        client = AsyncAnthropic(api_key=key)
+        msg = await client.messages.create(
+            model=model, max_tokens=400, system=SYSTEM_ANALYZE,
+            messages=[{"role": "user", "content": prompt}])
+        text = "".join(b.text for b in msg.content if b.type == "text")
+        usage = {"input_tokens": msg.usage.input_tokens, "output_tokens": msg.usage.output_tokens}
+    else:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=key, base_url=getattr(cfg, f"{provider}_base_url"))
+        r = await client.chat.completions.create(
+            model=model, max_tokens=400, temperature=0.2,
+            messages=[{"role": "system", "content": SYSTEM_ANALYZE},
+                      {"role": "user", "content": prompt}])
+        text = r.choices[0].message.content or ""
+        u = r.usage
+        usage = {"input_tokens": (u.prompt_tokens if u else 0) or 0,
+                  "output_tokens": (u.completion_tokens if u else 0) or 0}
+
+    text = text.strip()
+    return {"text": text, "refused": not text, "model": model, "provider": provider, "usage": usage}
+
+
 async def _roster() -> str:
     """Entity roster, rendered into the cached system prompt rather than exposed as a tool.
 

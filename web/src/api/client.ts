@@ -123,6 +123,14 @@ export const api = {
       body: JSON.stringify({ question, history, conversation_id: conversationId }),
       signal,
     }),
+  // Tool-less one-shot note (e.g. a live lap comparison) — deliberately not agentAsk,
+  // whose corpus-QA system prompt forces tool use and has no live-session context to search.
+  agentAnalyze: (prompt: string) =>
+    req("/v1/agent/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    }),
   graphSummary: () => req("/v1/admin/graph/summary"),
 
   listRaces: () => req("/v1/races"),

@@ -92,6 +92,28 @@ Two signals stored separately, then fused — not averaged:
   fusing by rank rather than raw score avoids one list dominating for no principled reason
   (`api/app/services/search.py`).
 
+## Graph projection (`common/graph_sync.py`)
+
+An optional Neo4j read model, on by default (`cfg.graph_enabled = True`) but strictly
+derived — rebuilt wholesale from Postgres on every sync (`graph_sync.rebuild()`), never
+written to directly, and a failed/unavailable Neo4j never fails a clip (`pipeline.py`'s
+`_sync_graph` swallows `GraphUnavailable`). With it off, search, the pipeline, and every
+other page behave identically.
+
+Core node labels: `Speaker`, `Clip`, `Utterance`, `Driver`, `Team`, `Session`, `Circuit`,
+`Lap`, `Race`, `RadioCall`/`Speech`, `EventType`. Key edges: `Utterance-[:IN_CLIP]->Clip`,
+`Utterance-[:SPOKEN_BY]->Speaker`, `Driver-[:VOICE_OF]->Speaker`,
+`Driver-[:DRIVES_FOR]->Team`, `Driver-[:DROVE_IN]->Session`, `Lap-[:BY]->Driver`,
+`Lap-[:IN]->Session`, `Speech-[:MENTIONS]->{Driver,Team,Circuit}` (entity-linked via the
+`f1_aliases` dictionary), `Speech-[:READS_AS]->EventType`.
+
+**Sentiment reaches the graph as node properties, not a separate node type**: `Clip` nodes
+carry `sentiment`, `sentiment_score`, `mood`; `Utterance` nodes carry `sentiment`,
+`sentiment_score`, `text_sentiment`, `mood` (mirrored straight off the `clips`/`utterances`
+columns the SENTIMENT stage writes). This means a graph query can combine an entity
+traversal with an emotional filter in one hop — e.g. every stressed utterance that
+`MENTIONS` a given driver this session — without a join across the relational schema.
+
 ## Offline posture
 
 `HF_HUB_OFFLINE=1` by default; models are loaded from `MODEL_DIR` on disk and the core
