@@ -329,7 +329,7 @@ export default function Ask() {
         New chat
       </button>
       <button
-        onClick={() => navigate("/")}
+        onClick={() => navigate("/library")}
         style={{
           display: "flex", alignItems: "center", gap: 8, background: "transparent", border: "none",
           font: "inherit", fontSize: 12.5, color: muted(60), cursor: "pointer",

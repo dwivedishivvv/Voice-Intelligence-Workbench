@@ -309,7 +309,7 @@ export default function ClipDetail() {
         <div style={{ display: "flex", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 320, display: "flex", flexDirection: "column", gap: 4 }}>
             <span className="kicker">
-              <a href="/" onClick={(e) => { e.preventDefault(); navigate("/"); }}>Library</a>
+              <a href="/library" onClick={(e) => { e.preventDefault(); navigate("/library"); }}>Library</a>
               {" / "}Clip {clip.id.slice(0, 6)}
             </span>
             <h2 style={{ margin: 0, fontSize: 30 }}>{clip.filename}</h2>
@@ -681,7 +681,7 @@ export default function ClipDetail() {
       </Dialog>
 
       <EditClipDialog clip={edit} onClose={() => setEdit(null)} onSaved={load} />
-      <DeleteClipDialog clip={del} onClose={() => setDel(null)} onDeleted={() => navigate("/")} />
+      <DeleteClipDialog clip={del} onClose={() => setDel(null)} onDeleted={() => navigate("/library")} />
     </div>
   );
 }

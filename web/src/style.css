@@ -280,3 +280,129 @@ textarea.input { min-height: 90px; resize: vertical; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-text) 22%, transparent); }
 ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--color-text) 38%, transparent); }
+
+/* ══ landing page ═════════════════════════════════════════════════════════
+   The marketing route at "/". Same Industry vocabulary as the workbench —
+   square frames, condensed headings, mono numerals — just given room to
+   breathe and a scroll timeline (GSAP/ScrollTrigger) laid over it. */
+
+.lp { --gut: clamp(20px, 5vw, 76px); background: var(--color-bg); }
+.lp section { position: relative; }
+.lp-wrap { max-width: 1320px; margin-inline: auto; padding-inline: var(--gut); }
+.lp-rule { height: 1px; background: var(--color-divider); }
+
+/* Blueprint grid ground — hairlines every 88px, faded at the edges. */
+.lp-grid-bg {
+  position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--color-text) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--color-text) 6%, transparent) 1px, transparent 1px);
+  background-size: 88px 88px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 65% at 50% 40%, #000 30%, transparent 100%);
+          mask-image: radial-gradient(ellipse 80% 65% at 50% 40%, #000 30%, transparent 100%);
+}
+
+/* — top bar — */
+.lp-nav {
+  position: fixed; inset: 0 0 auto 0; z-index: 40;
+  display: flex; align-items: center; gap: 18px;
+  padding: 14px var(--gut);
+  border-bottom: 1px solid transparent;
+  background: color-mix(in srgb, var(--color-bg) 0%, transparent);
+  transition: background .35s ease, border-color .35s ease, backdrop-filter .35s ease;
+}
+.lp-nav[data-stuck="1"] {
+  background: color-mix(in srgb, var(--color-bg) 86%, transparent);
+  backdrop-filter: blur(9px); border-bottom-color: var(--color-divider);
+}
+.lp-nav a.lp-navlink { color: color-mix(in srgb, var(--color-text) 62%, transparent); font-size: 13px; }
+.lp-nav a.lp-navlink:hover { color: var(--color-text); }
+
+/* — hero type — */
+.lp-h1 {
+  font-family: var(--font-heading); font-weight: 600;
+  font-size: clamp(52px, 10.5vw, 156px); line-height: 0.88;
+  letter-spacing: -0.03em; margin: 0; text-transform: uppercase;
+}
+.lp-h2 {
+  font-family: var(--font-heading); font-weight: 600; text-transform: uppercase;
+  font-size: clamp(32px, 5.2vw, 68px); line-height: 0.94; letter-spacing: -0.025em; margin: 0;
+}
+.lp-lede { font-size: clamp(15px, 1.35vw, 19px); line-height: 1.6; max-width: 56ch; }
+
+/* One line of the headline: the mask that the line slides up out of. */
+.lp-line { display: block; overflow: hidden; }
+.lp-line > span { display: block; will-change: transform; }
+
+/* — marquee — */
+.lp-marquee { display: flex; overflow: hidden; border-block: 1px solid var(--color-divider); padding: 13px 0; }
+.lp-marquee-track { display: flex; flex: none; gap: 44px; padding-right: 44px; will-change: transform; }
+.lp-marquee span {
+  font-family: var(--font-heading); text-transform: uppercase; letter-spacing: 0.1em;
+  font-size: 14px; white-space: nowrap; color: color-mix(in srgb, var(--color-text) 45%, transparent);
+}
+.lp-marquee span b { color: var(--color-accent); font-weight: inherit; }
+
+/* — cards — */
+.lp-card {
+  position: relative; border: 1px solid var(--color-divider); background: var(--color-surface);
+  padding: 22px 22px 26px; overflow: hidden; isolation: isolate;
+}
+.lp-card::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; opacity: 0;
+  background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 0%),
+              color-mix(in srgb, var(--color-accent) 17%, transparent), transparent 70%);
+  transition: opacity .4s ease;
+}
+.lp-card:hover::after { opacity: 1; }
+.lp-card:hover { border-color: color-mix(in srgb, var(--color-accent) 55%, transparent); }
+.lp-card .lp-idx {
+  font-family: var(--font-mono); font-size: 11px;
+  color: color-mix(in srgb, var(--color-text) 40%, transparent);
+}
+
+/* — pipeline — */
+.lp-stage {
+  border: 1px solid var(--color-divider); padding: 12px 14px; background: var(--color-bg);
+  transition: border-color .35s ease, background .35s ease, transform .35s ease;
+}
+.lp-stage[data-on="1"] {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 9%, var(--color-bg));
+  transform: translateX(6px);
+}
+.lp-stage-name {
+  font-family: var(--font-heading); text-transform: uppercase; letter-spacing: 0.06em; font-size: 15px;
+}
+.lp-flow path { fill: none; stroke-linecap: square; }
+
+/* — misc — */
+.lp-num { font-family: var(--font-mono); font-size: clamp(30px, 4vw, 50px); line-height: 1; letter-spacing: -0.02em; }
+.lp-dot { width: 6px; height: 6px; background: var(--color-accent); flex: none; }
+.lp-mag { display: inline-block; will-change: transform; }
+.lp-reveal { will-change: transform, opacity; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-reveal, .lp-line > span { transform: none !important; opacity: 1 !important; }
+  .lp-marquee-track { transform: none !important; }
+}
+
+/* Pipeline: list · connector · detail. Stacks on narrow screens. */
+.lp-pipe-grid {
+  display: grid; gap: 34px; align-items: center;
+  grid-template-columns: minmax(280px, 380px) 74px 1fr;
+}
+.lp-journey-track { display: flex; gap: 18px; padding-inline: var(--gut); width: max-content; }
+.lp-swap { animation: lpFade .45s ease both; }
+@keyframes lpFade { from { opacity: 0; transform: translateY(12px); } }
+
+@media (max-width: 980px) {
+  .lp-hide-sm { display: none !important; }
+  .lp-pipe-grid { grid-template-columns: 1fr; }
+  .lp-journey-track { width: auto; flex-wrap: wrap; }
+  .lp-journey-track > * { width: 100% !important; min-height: 0 !important; }
+  .lp-journey { min-height: 0 !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lp-swap { animation: none; }
+}

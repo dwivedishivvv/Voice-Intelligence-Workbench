@@ -250,7 +250,7 @@ export default function Upload() {
                   onClick={() => { setItems([]); localStorage.removeItem(STORE); }}>
             Clear batch
           </button>
-          <button className="btn btn-primary" onClick={() => navigate("/")}>Open in Library</button>
+          <button className="btn btn-primary" onClick={() => navigate("/library")}>Open in Library</button>
         </div>
       </header>
 

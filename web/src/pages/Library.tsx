@@ -97,7 +97,7 @@ export default function Library() {
               Needs review · {totals.review}
             </label>
             <label className="seg-opt">
-              <input type="radio" name="lib" checked={!inQueue} onChange={() => navigate("/")} />
+              <input type="radio" name="lib" checked={!inQueue} onChange={() => navigate("/library")} />
               All clips · {totals.all}
             </label>
           </div>

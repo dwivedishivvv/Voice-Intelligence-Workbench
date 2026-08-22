@@ -20,7 +20,7 @@ export function useSidebarTakeover(node: ReactNode | null, deps: unknown[]) {
 }
 
 const NAV = [
-  { to: "/", label: "Library", mark: "▤", end: true, count: "clips" },
+  { to: "/library", label: "Library", mark: "▤", end: true, count: "clips" },
   { to: "/review", label: "Review queue", mark: "◈", end: false, count: "review" },
   { to: "/ask", label: "Ask", mark: "?", end: false, count: null },
   { to: "/upload", label: "Upload", mark: "↑", end: false, count: "inflight" },
@@ -80,7 +80,8 @@ export default function Layout({ children }: { children: ReactNode }) {
           display: "flex", flexDirection: "column", padding: "20px 0",
           position: "sticky", top: 0, height: "100vh",
         }}>
-          <div style={{ padding: "0 18px 18px", display: "flex", flexDirection: "column", gap: 2 }}>
+          {/* The wordmark goes back out to the landing page. */}
+          <NavLink to="/" style={{ padding: "0 18px 18px", display: "flex", flexDirection: "column", gap: 2, color: "inherit" }}>
             <span style={{ fontFamily: "var(--font-heading)", fontSize: 19, lineHeight: 1.05, letterSpacing: "-.01em" }}>
               SPEAKER INTELLIGENCE
             </span>
@@ -88,7 +89,7 @@ export default function Layout({ children }: { children: ReactNode }) {
               WORKBENCH
             </span>
             <span className="kicker" style={{ marginTop: 6 }}>on-premises · v2.4</span>
-          </div>
+          </NavLink>
 
           {sidebar}
 
