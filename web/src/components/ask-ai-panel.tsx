@@ -70,7 +70,7 @@ export function AskAIPanel() {
         <span style={{ fontSize: 13, lineHeight: 1.55, color: muted(72) }}>
           Ask is the only feature that sends anything off this machine. Retrieval stays
           local; the passages it retrieves are sent to the provider below to be turned into
-          an answer. Everything else — transcription, diarization, identification, tone —
+          an answer. Everything else — transcription, diarization, identification —
           runs here regardless of what is set on this page.
         </span>
       </div>

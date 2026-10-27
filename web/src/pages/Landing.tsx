@@ -5,7 +5,6 @@ import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { useTheme } from "@/lib/theme";
 import {
   muted, ACCENT, GREEN, AMBER, AMBER_INK, VOICE_A, VOICE_B,
-  MOOD_COLOR, MOOD_PCT, SENTIMENT_COLOR, type Mood,
 } from "@/lib/ui";
 
 gsap.registerPlugin(ScrollTrigger);
@@ -29,9 +28,9 @@ const FEATURES = [
   { t: "Speaker ID", d: "Embeddings matched against enrolled profiles, reliability-gated — the system says nothing rather than guessing.", m: "ECAPA + pgvector" },
   { t: "Clustering", d: "Unknown voices cluster across clips. Promote a cluster to a real profile in one click.", m: "cross-clip" },
   { t: "Hybrid search", d: "Keyword, semantic, or both fused by reciprocal rank — over every utterance in the corpus.", m: "FTS · MiniLM · RRF" },
-  { t: "Sentiment & tone", d: "Multilingual XLM-R over the text, fused with the acoustic read, stored per utterance and rolled up per speaker.", m: "XLM-R + acoustic" },
-  { t: "Live capture", d: "Microphone in, pause-aligned chunking, transcript and tone read as you speak.", m: "streaming" },
-  { t: "Graph projection", d: "An optional Neo4j read model of clips, speakers, drivers, sessions and laps — rebuilt from Postgres, never authoritative.", m: "Neo4j · derived" },
+  { t: "Named entities", d: "People, companies and places pulled from the transcripts — only once the corpus names them more than once.", m: "on-box · abstaining" },
+  { t: "Live capture", d: "Microphone in, pause-aligned chunking, a transcript that builds as you speak.", m: "streaming" },
+  { t: "Knowledge graph", d: "A Neo4j map of people, voices, recordings, topics and named things — explorable, and walked by the agent.", m: "Neo4j · derived" },
 ];
 
 const JOURNEY = [
@@ -46,18 +45,6 @@ const OUTCOMES = [
   { t: "Suggested", d: "A plausible match, drawn italic, waiting on you.", c: VOICE_B, hatch: false },
   { t: "Unknown", d: "Judged — and nobody in the corpus matches.", c: "var(--color-neutral-600)", hatch: false },
   { t: "Abstained", d: "Declined to judge. Drawn hatched, never as a result.", c: AMBER, hatch: true },
-];
-
-const MOODS: { k: Mood; d: string }[] = [
-  { k: "calm", d: "Baseline — steady pace, level tone." },
-  { k: "tired", d: "Flattened energy, slower cadence." },
-  { k: "stressed", d: "Elevated pitch and pace, tension in the voice." },
-];
-
-const SENTIMENTS = [
-  { t: "Positive", k: "positive" as const, d: "Text reads favourably, and the acoustic signal agrees." },
-  { t: "Negative", k: "negative" as const, d: "Text reads unfavourably, and the acoustic signal agrees." },
-  { t: "Neutral", k: "neutral" as const, d: "No strong lean either way." },
 ];
 
 const STATS = [
@@ -123,35 +110,35 @@ function Counter({ to, suffix }: { to: number; suffix: string }) {
 }
 
 /** The Neo4j graph projection — the real node/edge shape from common/graph_sync.py's
- *  MERGE statements, trimmed to the core entities. Static and hand-laid-out rather than
+ *  MERGE statements. Static and hand-laid-out rather than
  *  force-simulated: the point is to show the actual schema legibly, not to demo physics. */
 const GRAPH_NODES: {
   id: string; label: string; x: number; y: number; above: boolean; c: string; tag: string | null;
 }[] = [
-  { id: "session", label: "Session", x: 330, y: 40, above: false, c: VOICE_B, tag: null },
-  { id: "team", label: "Team", x: 540, y: 100, above: false, c: "var(--color-neutral-500)", tag: null },
-  { id: "driver", label: "Driver", x: 420, y: 160, above: true, c: ACCENT, tag: null },
-  { id: "speaker", label: "Speaker", x: 210, y: 160, above: true, c: VOICE_A, tag: null },
-  { id: "lap", label: "Lap", x: 420, y: 258, above: false, c: AMBER, tag: null },
-  { id: "utterance", label: "Utterance", x: 210, y: 258, above: false, c: "var(--color-neutral-500)", tag: "+ sentiment, mood" },
-  { id: "clip", label: "Clip", x: 70, y: 200, above: false, c: "var(--color-neutral-500)", tag: "+ sentiment, mood" },
+  { id: "speaker", label: "Speaker", x: 120, y: 60, above: true, c: VOICE_A, tag: null },
+  { id: "voice", label: "Voice", x: 60, y: 200, above: false, c: VOICE_B, tag: "unnamed, recurring" },
+  { id: "clip", label: "Clip", x: 300, y: 150, above: true, c: ACCENT, tag: null },
+  { id: "utterance", label: "Utterance", x: 300, y: 262, above: false, c: "var(--color-neutral-500)", tag: null },
+  { id: "topic", label: "Topic", x: 480, y: 60, above: true, c: AMBER, tag: null },
+  { id: "entity", label: "Entity", x: 520, y: 220, above: false, c: GREEN, tag: "person · company · place" },
 ];
 const GRAPH_EDGES: [string, string, string][] = [
-  ["utterance", "speaker", "SPOKEN_BY"],
+  ["speaker", "clip", "APPEARS_IN"],
+  ["voice", "clip", "HEARD_IN"],
   ["utterance", "clip", "IN_CLIP"],
-  ["driver", "speaker", "VOICE_OF"],
-  ["driver", "session", "DROVE_IN"],
-  ["driver", "team", "DRIVES_FOR"],
-  ["lap", "driver", "BY"],
-  ["lap", "session", "IN"],
-];
+  ["utterance", "speaker", "SPOKEN_BY"],
+  ["clip", "topic", "ABOUT"],
+  ["speaker", "topic", "DISCUSSED"],
+  ["clip", "entity", "MENTIONS"],
+  ["utterance", "entity", "MENTIONS"],
+]
 const GRAPH_DOT = 6;
 
 function GraphDiagram() {
   const at = (id: string) => GRAPH_NODES.find((n) => n.id === id)!;
   return (
     <svg viewBox="0 0 620 300" style={{ width: "100%", height: "auto" }} role="img"
-         aria-label="Graph schema: clips and utterances link to speakers; drivers link to speakers, teams, sessions and laps">
+         aria-label="Graph schema: speakers and voices appear in clips; clips are about topics and mention entities; utterances are spoken by speakers">
       {GRAPH_EDGES.map(([a, b, label]) => {
         const pa = at(a), pb = at(b);
         const mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
@@ -523,78 +510,24 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* ── sentiment & tone ── */}
-      <section style={{ padding: "0 0 110px" }}>
-        <div className="lp-wrap">
-          <div className="lp-reveal" style={{ display: "flex", gap: 40, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 40 }}>
-            <div style={{ flex: "1 1 440px" }}>
-              <span className="kicker">§ 05 — Reading the room</span>
-              <h2 className="lp-h2" style={{ marginTop: 10 }}>Two signals.<br />Fused, not averaged.</h2>
-            </div>
-            <p className="lp-lede" style={{ flex: "1 1 360px", color: muted(66), margin: 0 }}>
-              Multilingual XLM-R reads the words; an acoustic model reads the voice underneath them.
-              Both are stored per utterance and rolled up per speaker — so a flat transcript and a
-              tense delivery are never collapsed into one number.
-            </p>
-          </div>
-
-          <div style={{ display: "grid", gap: 34, gridTemplateColumns: "repeat(auto-fit, minmax(min(320px, 100%), 1fr))" }}>
-            <div className="lp-card lp-reveal" onMouseMove={glow}>
-              <span className="lp-idx">Acoustic — tone</span>
-              <h3 style={{ fontSize: 20, margin: "12px 0 16px", textTransform: "uppercase" }}>How it was said</h3>
-              <div style={{ display: "grid", gap: 16 }}>
-                {MOODS.map((m) => (
-                  <div key={m.k}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-                      <span style={{ textTransform: "capitalize", color: MOOD_COLOR[m.k] }}>{m.k}</span>
-                      <span className="mono" style={{ fontSize: 11, color: muted(45) }}>{MOOD_PCT[m.k]}</span>
-                    </div>
-                    <div className="bar"><span style={{ width: MOOD_PCT[m.k], background: MOOD_COLOR[m.k] }} /></div>
-                    <p style={{ margin: "6px 0 0", fontSize: 12, color: muted(58) }}>{m.d}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="lp-card lp-reveal" onMouseMove={glow}>
-              <span className="lp-idx">Text — sentiment</span>
-              <h3 style={{ fontSize: 20, margin: "12px 0 16px", textTransform: "uppercase" }}>What was said</h3>
-              <div style={{ display: "grid", gap: 14 }}>
-                {SENTIMENTS.map((s) => (
-                  <div key={s.k} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                    <span style={{ width: 8, height: 8, marginTop: 5, flex: "none", background: SENTIMENT_COLOR[s.k] }} />
-                    <div>
-                      <div style={{ fontSize: 14, color: SENTIMENT_COLOR[s.k] }}>{s.t}</div>
-                      <p style={{ margin: "2px 0 0", fontSize: 12, color: muted(58) }}>{s.d}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="hr" style={{ margin: "18px 0 12px" }} />
-              <span className="mono" style={{ fontSize: 11, color: muted(45) }}>a disagreement between the two is surfaced, not hidden</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
       {/* ── graph projection ── */}
       <section style={{ padding: "0 0 110px" }}>
         <div className="lp-wrap">
           <div style={{ marginBottom: 34 }}>
-            <span className="kicker">§ 06 — The graph, not just the table</span>
-            <h2 className="lp-h2" style={{ marginTop: 10 }}>Every entity,<br />one hop from its mood.</h2>
+            <span className="kicker">§ 05 — The graph, not just the table</span>
+            <h2 className="lp-h2" style={{ marginTop: 10 }}>Every person,<br />one hop from what they said.</h2>
           </div>
 
           <div className="blueprint lp-reveal" style={{ padding: "clamp(24px,4vw,40px)", background: "var(--color-surface)" }}>
             <Corners />
             <p style={{ color: muted(70), margin: 0, maxWidth: "72ch" }}>
               An optional Neo4j projection, rebuilt from Postgres and never authoritative — turn
-              it off and search, the pipeline and every page carry on unchanged. What it buys: a
-              clip and every utterance in it carry their fused sentiment and mood as graph
-              properties, so one traversal can walk an entity <em>and</em> filter by emotional
-              read at the same time — <span className="mono" style={{ fontSize: 13, color: ACCENT }}>
-              "every stressed utterance mentioning the car this session"</span> is one graph
-              traversal, not a join across five tables.
+              it off and search, the pipeline and every page carry on unchanged. What it buys:
+              who appears with whom, what each person tends to discuss, and which companies and
+              people the recordings name together, as one traversal —{" "}
+              <span className="mono" style={{ fontSize: 13, color: ACCENT }}>
+              "everyone who talked about Reliance, and what else they raised"</span> is a walk,
+              not a join across five tables. Explore it on the Graph page, or ask the agent.
             </p>
             <div className="hr" style={{ marginBlock: 26 }} />
             <div className="lp-card" onMouseMove={glow}
@@ -612,19 +545,18 @@ export default function Landing() {
             <Corners />
             <div style={{ display: "grid", gap: 40, gridTemplateColumns: "repeat(auto-fit, minmax(min(300px, 100%), 1fr))", alignItems: "center" }}>
               <div>
-                <span className="kicker">§ 07 — Air-gapped by default</span>
+                <span className="kicker">§ 06 — Air-gapped by default</span>
                 <h2 className="lp-h2" style={{ marginTop: 10, fontSize: "clamp(28px,3.6vw,50px)" }}>HF_HUB_OFFLINE=1</h2>
                 <p style={{ color: muted(70), marginTop: 14, maxWidth: "48ch" }}>
                   Models are read from <span className="mono">MODEL_DIR</span> on disk. The core pipeline makes no
-                  outbound call at all. Two features can reach the network — Race Radio and the agent layer —
-                  and both stay off until you turn them on.
+                  outbound call at all. One feature can reach the network — the agent layer — and it
+                  stays off until you turn it on.
                 </p>
               </div>
               <div style={{ display: "grid", gap: 1, background: "var(--color-divider)", border: "1px solid var(--color-divider)" }}>
                 {([
                   ["Audio leaves the box", "never", GREEN],
                   ["Transcript leaves the box", "never", GREEN],
-                  ["Race Radio (OpenF1)", "opt-in", AMBER_INK],
                   ["Agent layer (LLM_ENABLED)", "opt-in", AMBER_INK],
                   ["Audit log", "hash-chained", ACCENT],
                 ] as const).map(([k, v, c]) => (

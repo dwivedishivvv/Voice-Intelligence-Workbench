@@ -27,7 +27,7 @@ def test_evict_skips_excluded_and_uncached():
 
 def test_load_retries_after_evicting_on_oom(monkeypatch):
     pool = _bare_pool()
-    pool._cache = {"sentiment": object()}  # occupying the slot that should get evicted
+    pool._cache = {"text_embedder": object()}  # occupying the slot that should get evicted
     calls = []
 
     def fake_load_diar():
@@ -41,13 +41,13 @@ def test_load_retries_after_evicting_on_oom(monkeypatch):
 
     result = pool._get("diar")
     assert result == "diar-model"
-    assert "sentiment" not in pool._cache  # evicted to make room
+    assert "text_embedder" not in pool._cache  # evicted to make room
     assert len(calls) == 2  # first attempt OOM'd, retry succeeded
 
 
 def test_non_oom_error_propagates_without_evicting(monkeypatch):
     pool = _bare_pool()
-    pool._cache = {"sentiment": object()}
+    pool._cache = {"text_embedder": object()}
     monkeypatch.setattr(pool, "_load_diar", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
 
     try:
@@ -55,12 +55,12 @@ def test_non_oom_error_propagates_without_evicting(monkeypatch):
         assert False, "expected RuntimeError to propagate"
     except RuntimeError as e:
         assert "boom" in str(e)
-    assert "sentiment" in pool._cache  # untouched — this wasn't an OOM
+    assert "text_embedder" in pool._cache  # untouched — this wasn't an OOM
 
 
 def test_cpu_never_evicts(monkeypatch):
     pool = _bare_pool(device="cpu")
-    pool._cache = {"sentiment": object()}
+    pool._cache = {"text_embedder": object()}
     monkeypatch.setattr(pool, "_load_diar", lambda: (_ for _ in ()).throw(RuntimeError("out of memory")))
 
     try:
@@ -68,4 +68,4 @@ def test_cpu_never_evicts(monkeypatch):
         assert False, "CPU OOM should propagate, not trigger eviction"
     except RuntimeError:
         pass
-    assert "sentiment" in pool._cache
+    assert "text_embedder" in pool._cache

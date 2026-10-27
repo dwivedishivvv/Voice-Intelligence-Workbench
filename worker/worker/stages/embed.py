@@ -1,3 +1,4 @@
+import asyncio
 from collections import defaultdict
 
 import numpy as np
@@ -18,6 +19,11 @@ SPLIT_HALF_MIN_S = 3.0
 # raised threshold. The failure mode this catches is the expensive one: a blended
 # embedding can sit plausibly close to a third profile and get a confident wrong name.
 SPLIT_HALF_SUSPECT = 0.60
+
+# Longest single turn used whole for a voiceprint. An embedding stops improving well before
+# this (embed_target_s is 8s), while the cost keeps growing: one 336s monologue was fed to
+# ResNet293 whole, and the EMBEDDING stage of that 8-minute clip took 50s.
+MAX_SEGMENT_S = 30.0
 
 
 def _noise_power(audio: np.ndarray, vad: list) -> float:
@@ -69,11 +75,17 @@ def select_segments(audio_norm, turns, cfg, noise_power: float, min_s=None):
     usable = [t for t in turns if not t["is_overlap"] and not t.get("too_short")]
 
     scored = []
+    cap = int(MAX_SEGMENT_S * SR)
     for t in usable:
         a, b = int(t["start"] * SR), int(t["end"] * SR)
         seg = audio_norm[a:b]
         if not seg.size:
             continue
+        if seg.size > cap:
+            # the middle of a very long turn: away from the edges where the diarizer's
+            # boundary is least sure who is talking
+            mid = seg.size // 2
+            seg = seg[mid - cap // 2:mid - cap // 2 + cap]
         dur = seg.size / SR
         scored.append((dur * (0.5 + 0.5 * segment_quality(seg, noise_power, cfg)), seg))
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -106,15 +118,14 @@ def _split_halves(chunks: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray] | N
     return np.concatenate(a), np.concatenate(b)
 
 
-def encode_many(pool, segs: list[np.ndarray]) -> np.ndarray:
-    """Embeddings for many audio segments in ONE padded forward pass.
+# Padded audio per encoder forward pass. Every row in a batch is padded to the longest one,
+# and select_segments can hand back a single uninterrupted turn of several minutes: an
+# 8-minute clip with a 336s monologue padded all twelve rows to 336s — about an hour of
+# audio in one pass — and ran a 6GB GPU out of memory in this stage.
+EMBED_BATCH_BUDGET_S = 120.0
 
-    Every speaker's full audio and both of its halves go through together, so a 4-speaker
-    clip costs one GPU round trip instead of four (twelve once split-half checking is
-    counted). `wav_lens` carries the true length of each row so the encoder's statistics
-    pooling ignores the padding — without it the padded tail would be averaged in as if it
-    were silence the speaker produced.
-    """
+
+def _encode_padded(pool, segs: list[np.ndarray]) -> np.ndarray:
     lens = [int(s.size) for s in segs]
     width = max(lens)
     batch = np.zeros((len(segs), width), dtype=np.float32)
@@ -128,6 +139,45 @@ def encode_many(pool, segs: list[np.ndarray]) -> np.ndarray:
     return F.normalize(embs, dim=-1).cpu().numpy().astype(np.float32)
 
 
+def encode_many(pool, segs: list[np.ndarray], budget_s: float = EMBED_BATCH_BUDGET_S) -> np.ndarray:
+    """Embeddings for many audio segments, batched padded forward passes.
+
+    Every speaker's full audio and both of its halves go through together where they fit,
+    so a typical clip still costs one GPU round trip instead of one per row. `wav_lens`
+    carries the true length of each row so the encoder's statistics pooling ignores the
+    padding — without it the padded tail would be averaged in as if it were silence the
+    speaker produced.
+
+    Rows are grouped shortest-first under a padded-audio budget, so one long row no longer
+    drags every other row out to its length; a row longer than the budget runs alone. Same
+    rows, same weights, same results — only how many share a pass changes. Should a batch
+    still not fit, its rows are retried one at a time before giving up.
+    """
+    budget = int(budget_s * SR)
+    order = sorted(range(len(segs)), key=lambda i: segs[i].size)
+    groups: list[list[int]] = []
+    for i in order:
+        # ascending order, so this row is the widest the group would have
+        if groups and (len(groups[-1]) + 1) * segs[i].size <= budget:
+            groups[-1].append(i)
+        else:
+            groups.append([i])
+
+    out: list[np.ndarray | None] = [None] * len(segs)
+    for g in groups:
+        g = sorted(g)  # length only decides the grouping; rows keep their caller's order
+        try:
+            embs = _encode_padded(pool, [segs[i] for i in g])
+        except torch.OutOfMemoryError:
+            if len(g) == 1:
+                raise
+            torch.cuda.empty_cache()
+            embs = np.concatenate([_encode_padded(pool, [segs[i]]) for i in g])
+        for i, e in zip(g, embs):
+            out[i] = e
+    return np.stack(out)
+
+
 def extract(audio_norm, turns, cfg, pool, min_s=None, noise_power: float | None = None):
     """Kept for callers that want one label's embedding on its own. run() uses the batched
     path instead, which is the same computation for every label at once."""
@@ -138,26 +188,33 @@ def extract(audio_norm, turns, cfg, pool, min_s=None, noise_power: float | None 
     return encode_many(pool, [np.concatenate(chunks)])[0], total, len(chunks)
 
 
-async def run(ctx):
+def compute_speakers(audio_norm, turns_all, vad, cfg, pool, warn) -> dict[str, SpeakerResult]:
+    """One voiceprint (plus its reliability and split-half check) per diarization label.
+
+    Separate from run() so worker/reembed.py can rebuild stored voiceprints from a clip's
+    saved audio and turns with exactly this logic when the embedding model changes — two
+    copies of segment selection would drift, and the migrated vectors would then mean
+    something slightly different from the ones every new clip gets.
+    """
     by_label = defaultdict(list)
-    for t in ctx.turns:
+    for t in turns_all:
         by_label[t["label"]].append(t)
 
-    noise_power = _noise_power(ctx.audio_norm, ctx.vad)
+    noise_power = _noise_power(audio_norm, vad)
 
     # Everything the encoder has to see, gathered before it is called once. `plan` maps
     # each label to the rows it owns in the batch.
     segs: list[np.ndarray] = []
     plan: dict[str, dict] = {}
     for label, turns in by_label.items():
-        chunks, total = select_segments(ctx.audio_norm, turns, ctx.cfg, noise_power)
+        chunks, total = select_segments(audio_norm, turns, cfg, noise_power)
         entry = {"total": total, "n_seg": len(chunks), "full": None, "halves": None,
                  "quality": None}
         if chunks:
             selected = np.concatenate(chunks)
             entry["quality"] = {
                 "snr_db": _snr_db(selected, noise_power),
-                "clipping_ratio": float(np.mean(np.abs(selected) >= ctx.cfg.clipping_threshold)),
+                "clipping_ratio": float(np.mean(np.abs(selected) >= cfg.clipping_threshold)),
                 "bandwidth_hz": rolloff_99(selected, SR),
             }
             entry["full"] = len(segs)
@@ -168,8 +225,9 @@ async def run(ctx):
                 segs.extend(halves)
         plan[label] = entry
 
-    embs = encode_many(ctx.pool, segs) if segs else np.empty((0, 0), dtype=np.float32)
+    embs = encode_many(pool, segs) if segs else np.empty((0, 0), dtype=np.float32)
 
+    speakers: dict[str, SpeakerResult] = {}
     for label, entry in plan.items():
         turns = by_label[label]
         emb = embs[entry["full"]] if entry["full"] is not None else None
@@ -185,19 +243,26 @@ async def run(ctx):
         # close-mic speaker and a distant noisy one in the same clip came out equally
         # reliable, and the difference that matters most to identification was the one
         # thing the score could not see.
-        rel = reliability_score(total, entry["quality"] or {}, ctx.cfg) if emb is not None else 0.0
+        rel = reliability_score(total, entry["quality"] or {}, cfg) if emb is not None else 0.0
         reason = None if emb is not None else "insufficient_speech"
         if split_sim is not None and split_sim < SPLIT_HALF_SUSPECT:
             # halves of one voice should agree; scale reliability by how much they didn't
             rel *= clamp01(split_sim / SPLIT_HALF_SUSPECT)
             reason = "split_half_disagreement"
-            ctx.warn("MIXED_LABEL_SUSPECTED", label=label, split_half_sim=round(split_sim, 3))
+            warn("MIXED_LABEL_SUSPECTED", label=label, split_half_sim=round(split_sim, 3))
 
-        ctx.speakers[label] = SpeakerResult(
+        speakers[label] = SpeakerResult(
             local_label=label, embedding=emb, speech_s=total, n_turns=len(turns),
             n_segments_used=n_seg, reliability=rel, reliability_reason=reason,
             split_half_sim=split_sim)
         if emb is None:
-            ctx.warn("SPEAKER_TOO_SHORT", label=label, duration_s=total)
-        elif rel < ctx.cfg.reliability_fair:
-            ctx.warn("LOW_RELIABILITY_EMBEDDING", label=label, reliability=rel)
+            warn("SPEAKER_TOO_SHORT", label=label, duration_s=total)
+        elif rel < cfg.reliability_fair:
+            warn("LOW_RELIABILITY_EMBEDDING", label=label, reliability=rel)
+    return speakers
+
+
+async def run(ctx):
+    # off the event loop: the encoder forward passes are the slow part of this stage
+    ctx.speakers.update(await asyncio.to_thread(
+        compute_speakers, ctx.audio_norm, ctx.turns, ctx.vad, ctx.cfg, ctx.pool, ctx.warn))

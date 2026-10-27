@@ -1,3 +1,5 @@
+import asyncio
+
 from common import db
 from ..ctx import SR
 from ..errors import RejectError
@@ -126,18 +128,45 @@ def clean_turns(raw, vad, cfg):
     return out
 
 
-async def run(ctx):
+def tidy_relabelled(turns, cfg):
+    """clean_turns' tail again, after recluster.py has changed who is who: neighbouring
+    turns that now share a label merge, and overlap is re-derived — two pyannote labels
+    talking at once that turn out to be one person were never an overlap."""
+    long_turns = merge_adjacent([t for t in turns if not t.get("too_short")], cfg.merge_gap_s)
+    long_turns = annotate_overlaps(long_turns)
+    short = [dict(t) for t in turns if t.get("too_short")]
+    for y in short:
+        y["is_overlap"] = any(
+            o["label"] != y["label"] and min(o["end"], y["end"]) > max(o["start"], y["start"])
+            for o in long_turns)
+    out = sorted(long_turns + short, key=lambda x: x["start"])
+    for i, x in enumerate(out):
+        x["idx"] = i
+    return out
+
+
+def _diarize(ctx):
     import torch
     kwargs = {"min_speakers": ctx.cfg.diar_min_speakers, "max_speakers": ctx.cfg.diar_max_speakers}
     ann = ctx.pool.diar(
         {"waveform": torch.from_numpy(ctx.audio_clean).unsqueeze(0), "sample_rate": SR}, **kwargs)
+    return [{"start": seg.start, "end": seg.end, "label": lbl}
+            for seg, _, lbl in ann.itertracks(yield_label=True)]
 
-    raw = [{"start": seg.start, "end": seg.end, "label": lbl}
-           for seg, _, lbl in ann.itertracks(yield_label=True)]
+
+async def run(ctx):
+    raw = await asyncio.to_thread(_diarize, ctx)
 
     turns = clean_turns(raw, ctx.vad, ctx.cfg)
     if not turns:
         raise RejectError("NO_SPEAKER_TURNS", "diarization produced no usable turns")
+    if ctx.cfg.diar_recluster_threshold > 0:
+        # who-is-who answered again with the stronger embedder; see recluster.py. Taken
+        # from audio_norm, the same signal voiceprints are made from.
+        from . import recluster
+        turns = await asyncio.to_thread(
+            recluster.recluster, turns, ctx.audio_norm, ctx.pool, ctx.cfg.diar_recluster_threshold)
+        turns = tidy_relabelled(turns, ctx.cfg)
 
     ctx.turns = turns
     labels = {t["label"] for t in turns}

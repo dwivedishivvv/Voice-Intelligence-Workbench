@@ -1,9 +1,25 @@
-# Datastores only. api / worker / web run natively in dev — see start.ps1.
 name: speaker-workbench
 
+# ── shared defaults ────────────────────────────────────────────────────────────
 x-common: &common
   restart: unless-stopped
 
+x-app-env: &app-env
+  # Override host/URL settings so containers reach each other by service name,
+  # not localhost. All other settings (API_KEY, model paths, thresholds, …)
+  # are read from .env via env_file below.
+  POSTGRES_HOST: postgres
+  REDIS_URL: "redis://redis:6379/0"
+  GRAPH_URI: "bolt://neo4j:7687"
+  DATA_DIR: /data
+  MODEL_DIR: /models
+  HF_HOME: /models/.cache
+  # pyannote ignores HF_HOME and reads this directly
+  PYANNOTE_CACHE: /models/.cache/hub
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+
+# ── datastores ─────────────────────────────────────────────────────────────────
 services:
   postgres:
     <<: *common
@@ -15,9 +31,6 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-      # The files init.sql includes. Mounted here rather than in initdb.d because anything
-      # in initdb.d is also run on its own, alphabetically — f1.sql would run before
-      # init.sql and fail on the tables it alters.
       - ./db:/db:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
@@ -35,21 +48,10 @@ services:
       retries: 10
     ports: ["6379:6379"]
 
-  # Derived read model, rebuilt from Postgres by common/graph_sync.py. Nothing in the
-  # pipeline writes to it, so losing this volume costs a re-projection and nothing else.
-  # Started with the other datastores but only used when GRAPH_ENABLED=true.
   neo4j:
-    # Deliberately NOT `<<: *common`. The anchor carries `env_file: .env`, and the neo4j
-    # image turns *every* NEO4J_-prefixed variable it finds into a server config setting --
-    # so the app's own NEO4J_URI was read as a setting named "URI" and the container
-    # refused to boot ("Unrecognized setting"). The app-side variables are GRAPH_* for that
-    # reason. Skipping env_file also keeps the Postgres password and API key out of a
-    # container that has no use for either.
     restart: unless-stopped
     image: neo4j:5-community
     environment:
-      # `:?` so a missing password fails the up with a named error instead of silently
-      # starting the database with blank auth.
       NEO4J_AUTH: neo4j/${GRAPH_PASSWORD:?set GRAPH_PASSWORD in .env}
       NEO4J_server_memory_heap_max__size: 1G
     volumes:
@@ -61,6 +63,77 @@ services:
       retries: 20
     ports: ["7474:7474", "7687:7687"]
 
+# ── application services ───────────────────────────────────────────────────────
+  api:
+    <<: *common
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+    volumes:
+      - app_data:/data
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *common
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+      # NVIDIA container runtime — expose all GPUs with full compute capabilities.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # Set HF_TOKEN here (or in .env) to download gated models (pyannote diarization).
+      # Leave empty if you already have models in the volume.
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Allow downloads on first run (prefetch.py sets offline back to 1 after fetching)
+      HF_HUB_OFFLINE: "0"
+      TRANSFORMERS_OFFLINE: "0"
+    volumes:
+      - app_data:/data
+      - models_data:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # GPU access — requires nvidia-container-toolkit on the host.
+    # Remove the `deploy` block entirely if running CPU-only.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  web:
+    <<: *common
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    environment:
+      # Vite's proxy target: the api service on the Docker network.
+      API_URL: http://api:8000
+    ports: ["5174:5174"]
+    depends_on:
+      - api
+
+# ── persistent volumes ─────────────────────────────────────────────────────────
 volumes:
   pgdata: {}
   neo4jdata: {}
+  # Uploaded audio, processed work files, exports — freed from C:/data on the host.
+  app_data: {}
+  # ML model weights (~8 GB) — freed from C:/models on the host.
+  # On a fresh install the worker's entrypoint downloads them automatically on first run.
+  models_data: {}

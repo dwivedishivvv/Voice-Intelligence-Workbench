@@ -9,17 +9,18 @@ export type ClipRef = {
   n_speakers?: number | null; created_at?: string | null;
 };
 
-/** Edit a clip's metadata. Only the three things the API can actually store are offered —
- *  a field that looks editable but is dropped on save is worse than no field. */
+/** Edit a clip's metadata. Only what the API can actually store is offered — a field that
+ *  looks editable but is dropped on save is worse than no field. */
 export function EditClipDialog({ clip, onClose, onSaved }: {
   clip: ClipRef | null; onClose: () => void; onSaved?: () => void;
 }) {
-  const [form, setForm] = useState({ tags: "", notes: "", needs_review: false });
+  const [form, setForm] = useState({ filename: "", tags: "", notes: "", needs_review: false });
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!clip) return;
     api.getClip(clip.id).then((full) => setForm({
+      filename: full.filename || "",
       tags: (full.tags || []).join(", "),
       notes: full.notes || "",
       needs_review: full.needs_review,
@@ -31,6 +32,7 @@ export function EditClipDialog({ clip, onClose, onSaved }: {
     setBusy(true);
     try {
       await api.patchClip(clip.id, {
+        filename: form.filename.trim() || undefined,
         tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean),
         notes: form.notes,
         needs_review: form.needs_review,
@@ -50,7 +52,7 @@ export function EditClipDialog({ clip, onClose, onSaved }: {
       kicker="Library"
       title="Edit clip details"
       subject={clip ? `${clip.filename}${clip.created_at ? ` · uploaded ${fmtAgo(clip.created_at)}` : ""}` : ""}
-      consequence="Metadata only. Transcript, voices and tone readings are untouched."
+      consequence="Metadata only. Transcript and voices are untouched."
       confirm="Save changes"
       width="540px"
       busy={busy}
@@ -58,8 +60,13 @@ export function EditClipDialog({ clip, onClose, onSaved }: {
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div className="field">
+          <label>Name</label>
+          <input className="input" value={form.filename}
+                 onChange={(e) => setForm({ ...form, filename: e.target.value })} />
+        </div>
+        <div className="field">
           <label>Tags</label>
-          <input className="input" value={form.tags} placeholder="pitwall, stint-3, radio"
+          <input className="input" value={form.tags} placeholder="standup, q3-review, customer"
                  onChange={(e) => setForm({ ...form, tags: e.target.value })} />
         </div>
         <div className="field">

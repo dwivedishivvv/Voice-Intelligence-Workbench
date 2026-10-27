@@ -4,10 +4,8 @@ asserted here are mostly about honesty rather than formatting:
 
   - every block carries its speech id, or a downstream claim cannot be cited back to the
     recording it came from;
-  - tone is phrased as a reading, never as a fact, because the classifier behind it is a
-    threshold heuristic;
-  - text/acoustic disagreement is surfaced rather than averaged away;
-  - a missing neighbourhood renders as absence, not as a guess.
+  - a missing neighbourhood renders as absence, not as a guess;
+  - the recording and offset are named, so a quote can be found in the audio.
 
 Pure function, so none of this needs Postgres or Neo4j.
 """
@@ -19,21 +17,17 @@ from api.app.services.graph_context import render_context
 
 FULL = {
     "speech_id": "abc-123",
-    "text": "I can't get past, the tyres are gone",
-    "mood": "stressed", "sentiment": "negative", "sentiment_score": -0.62,
-    "text_sentiment": "negative",
-    "speaker": None, "driver": "VER", "team": "Red Bull Racing",
-    "session": "Monaco Grand Prix", "year": 2024, "circuit": "Monaco",
-    "clip_id": None, "filename": None,
-    "prev_text": "Box this lap", "next_text": "Copy that",
-    "laps": [{"number": 42, "duration_s": 74.8, "prev_s": 73.9, "next_s": 75.1}],
-    "mentions": [{"kind": "Driver", "name": "LEC"}],
+    "text": "Reliance led the round and Dunzo needed their sign-off",
+    "speaker": "Marta", "clip_id": "c1", "filename": "board_call.wav", "start_s": 75.0,
+    "prev_text": "What happened with the funding?", "prev_speaker": "Dan",
+    "next_text": "That slowed everything down", "next_speaker": None,
+    "mentions": [{"kind": "name", "name": "Reliance"}, {"kind": "person", "name": "Kabir Biswas"}],
+    "topics": ["quick commerce"],
 }
 
-BARE = {"speech_id": "bare-1", "text": "Copy that", "mood": None, "sentiment": None,
-        "sentiment_score": None, "text_sentiment": None, "speaker": None, "driver": None,
-        "team": None, "session": None, "year": None, "circuit": None,
-        "prev_text": None, "next_text": None, "laps": [], "mentions": []}
+BARE = {"speech_id": "bare-1", "text": "Copy that", "speaker": None, "clip_id": None,
+        "filename": None, "start_s": None, "prev_text": None, "next_text": None,
+        "mentions": [], "topics": []}
 
 
 def test_every_block_leads_with_its_speech_id():
@@ -44,61 +38,13 @@ def test_every_block_leads_with_its_speech_id():
     assert "[bare-1]" in out
 
 
-def test_tone_is_reported_as_a_reading_not_a_fact():
-    out = render_context([FULL])
-    assert "voice reads stressed" in out
-    # the assertion that must never appear: tone stated as something that was true
-    assert "was stressed" not in out
-    assert "is stressed" not in out
-
-
-def test_voice_and_words_are_reported_separately():
-    """A calm-sounding delivery of negative words is a signal. Both reads are shown so the
-    reader sees the tension rather than a single averaged verdict."""
-    row = {**FULL, "mood": "calm", "sentiment": "negative", "text_sentiment": "negative"}
-    out = render_context([row])
-    assert "voice reads calm" in out and "words read negative" in out
-
-
-def test_text_read_is_surfaced_when_it_disagrees_with_the_fused_read():
-    """The fusion can land somewhere the text alone did not. When those differ the text
-    read is called out explicitly — otherwise the fused label silently overwrites it and
-    the disagreement the pipeline went to the trouble of storing is lost here."""
-    row = {**FULL, "mood": "calm", "sentiment": "neutral", "text_sentiment": "negative"}
-    assert "text alone reads negative" in render_context([row])
-
-
-def test_no_extra_text_line_when_the_reads_agree():
-    row = {**FULL, "sentiment": "negative", "text_sentiment": "negative"}
-    assert "text alone reads" not in render_context([row])
-
-
-def test_agreeing_reads_are_not_repeated():
-    """When the text read matches the fused read there is nothing extra to say, and
-    repeating it would pad every block for no information."""
-    assert render_context([FULL]).count("negative") == 1
-
-
-def test_lap_time_carries_its_delta_to_the_previous_lap():
-    """A bare lap time means nothing without a comparison; the delta is the whole point of
-    lining speech up against laps."""
-    out = render_context([FULL])
-    assert "lap 42: 74.8s" in out and "+0.9s vs previous" in out
-
-
-def test_lap_without_a_previous_lap_renders_without_a_delta():
-    row = {**FULL, "laps": [{"number": 1, "duration_s": 80.0, "prev_s": None, "next_s": None}]}
-    out = render_context([row])
-    assert "lap 1: 80.0s" in out and "vs previous" not in out
-
-
 def test_missing_neighbourhood_is_absent_not_invented():
-    """Most of the corpus has no session, no lap and no enrolled speaker. Those blocks must
+    """Most of the corpus has no enrolled speaker and names nothing. Those blocks must
     render as short, not as a block full of None."""
     out = render_context([BARE])
     assert "None" not in out
     assert "unidentified speaker" in out
-    assert "lap" not in out and "mentions" not in out
+    assert "names:" not in out and "topics" not in out
 
 
 def test_unknown_speaker_is_named_as_unknown():
@@ -107,10 +53,18 @@ def test_unknown_speaker_is_named_as_unknown():
     assert "unidentified speaker" in render_context([BARE])
 
 
-def test_speaker_is_used_when_there_is_no_driver():
-    row = {**BARE, "speaker": "Race Engineer"}
+def test_speaker_is_named_when_known():
+    row = {**BARE, "speaker": "Marta"}
     out = render_context([row])
-    assert "Race Engineer" in out and "unidentified speaker" not in out
+    assert "Marta" in out and "unidentified speaker" not in out
+
+
+def test_context_carries_names_topics_and_who_spoke_either_side():
+    out = render_context([FULL])
+    assert "names: Reliance, Kabir Biswas (person)" in out
+    assert "recording topics: quick commerce" in out
+    assert 'before (Dan): "What happened with the funding?"' in out
+    assert 'after: "That slowed everything down"' in out
 
 
 def test_row_order_is_preserved():
@@ -158,12 +112,13 @@ def test_resolve_falls_back_to_postgres_for_ids_the_graph_has_not_seen(monkeypat
     from api.app.services import graph_context as gc
 
     async def fake_graph_run(*a, **kw):
-        return [{"speech_id": "in-graph", "text": "from neo4j", "laps": [{"number": 3}]}]
+        return [{"speech_id": "in-graph", "text": "from neo4j",
+                 "mentions": [{"kind": "name", "name": "Dunzo"}]}]
 
     async def fake_fetch(sql, ids):
         if "utterances" in sql:
             return [{"speech_id": "in-pg", "text": "from postgres", "clip_id": "c1",
-                     "start_s": 4.2, "mood": "stressed"}]
+                     "start_s": 4.2}]
         return []
 
     monkeypatch.setattr(gc.graph, "run", fake_graph_run)
@@ -173,9 +128,9 @@ def test_resolve_falls_back_to_postgres_for_ids_the_graph_has_not_seen(monkeypat
     assert [r["speech_id"] for r in rows] == ["in-graph", "in-pg"], "anchor order not preserved"
     # The graph row keeps the edges only it has; the Postgres row carries what the UI needs
     # to make the citation clickable.
-    assert rows[0]["laps"] == [{"number": 3}]
+    assert rows[0]["mentions"] == [{"kind": "name", "name": "Dunzo"}]
     assert rows[1]["clip_id"] == "c1" and rows[1]["start_s"] == 4.2
-    assert rows[1]["laps"] == [] and rows[1]["mentions"] == []
+    assert rows[1]["mentions"] == [] and rows[1]["topics"] == []
 
 
 def test_resolve_works_with_the_graph_switched_off(monkeypatch):
@@ -197,20 +152,46 @@ def test_resolve_works_with_the_graph_switched_off(monkeypatch):
     assert rows and rows[0]["clip_id"] == "c1"
 
 
-def test_resolve_reads_radio_calls_as_well_as_utterances(monkeypatch):
-    """Radio calls are most of the F1 corpus and never reach the utterances table unless
-    they go through the full pipeline."""
-    from api.app.services import graph_context as gc
+# --- uploaded clips: which recording, and the part that matched -------------------
+#
+# Most of a corpus is uploaded recordings with usually no enrolled speaker. Every hit from one used to render as "unidentified speaker: <first 160
+# characters>", which named neither the recording nor, in long podcast turns, the words
+# that matched.
 
-    async def fake_graph_run(*a, **kw):
-        return []
+LONG = ("In 2014 Zomato was still a restaurant listing app and Swiggy was still figuring out "
+        "the first version of its app. Kabir Biswas was 30 years old at this time and had "
+        "seen little success with his first startup Hopper.")
 
-    async def fake_fetch(sql, ids):
-        return ([] if "utterances" in sql
-                else [{"speech_id": "r1", "text": "box box", "driver": "NOR"}])
 
-    monkeypatch.setattr(gc.graph, "run", fake_graph_run)
-    monkeypatch.setattr(gc.db, "fetch", fake_fetch)
+def test_brief_names_the_clip_and_offset():
+    from api.app.services.graph_context import render_brief
+    row = {**BARE, "filename": "meeting_100s.wav", "start_s": 62.4}
+    assert 'clip "meeting_100s.wav" at 1:02' in render_brief([row])
 
-    rows = asyncio.run(gc.resolve(["r1"]))
-    assert rows and rows[0]["driver"] == "NOR"
+
+def test_context_block_names_the_clip():
+    out = render_context([{**BARE, "filename": "meeting_100s.wav", "start_s": 9.0}])
+    assert out.startswith('[bare-1] clip "meeting_100s.wav" at 0:09')
+
+
+def test_long_quote_is_windowed_on_the_query_term():
+    """Observed: the search for "Kabir" returned this line clipped before the surname, and
+    the model supplied a surname of its own."""
+    from api.app.services.graph_context import render_brief
+    out = render_brief([{**BARE, "text": LONG}], max_text=120, terms=["kabir"])
+    assert "Kabir Biswas" in out
+    quote = out.split(': "', 1)[1].rstrip('"')
+    assert len(quote) <= 120 and quote.startswith("…")
+
+
+def test_long_quote_without_terms_is_cut_from_the_start_as_before():
+    from api.app.services.graph_context import render_brief
+    out = render_brief([{**BARE, "text": LONG}], max_text=60)
+    quote = out.split(': "', 1)[1].rstrip('"')
+    assert quote.startswith("In 2014") and quote.endswith("…") and len(quote) <= 60
+
+
+def test_short_quote_is_untouched_by_windowing():
+    from api.app.services.graph_context import render_brief
+    out = render_brief([{**BARE, "text": "Copy that"}], terms=["copy"])
+    assert out.endswith(': "Copy that"')

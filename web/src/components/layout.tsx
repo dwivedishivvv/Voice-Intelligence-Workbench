@@ -25,12 +25,12 @@ const NAV = [
   { to: "/ask", label: "Ask", mark: "?", end: false, count: null },
   { to: "/upload", label: "Upload", mark: "↑", end: false, count: "inflight" },
   { to: "/live", label: "Live", mark: "◉", end: false, count: null },
-  { to: "/races", label: "Races", mark: "◇", end: false, count: "races" },
   { to: "/speakers", label: "Speakers", mark: "◍", end: false, count: "speakers" },
+  { to: "/graph", label: "Graph", mark: "⬡", end: false, count: null },
   { to: "/settings", label: "Settings", mark: "≡", end: false, count: "overrides" },
 ] as const;
 
-type Counts = Partial<Record<"clips" | "review" | "inflight" | "races" | "speakers" | "overrides", number>>;
+type Counts = Partial<Record<"clips" | "review" | "inflight" | "speakers" | "overrides", number>>;
 
 const TERMINAL = ["COMPLETE", "FAILED", "REJECTED", "DEAD"];
 
@@ -47,9 +47,9 @@ export default function Layout({ children }: { children: ReactNode }) {
     let alive = true;
     (async () => {
       try {
-        const [stats, review, races, speakers, settings] = await Promise.all([
+        const [stats, review, speakers, settings] = await Promise.all([
           api.stats(), api.listClips({ needs_review: "true", limit: "1" }),
-          api.listRaces(), api.listSpeakers(), api.getSettings(),
+          api.listSpeakers(), api.getSettings(),
         ]);
         if (!alive) return;
         const inflight = Object.entries(stats.by_status || {})
@@ -57,7 +57,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           .reduce((n, [, c]) => n + (c as number), 0);
         setCounts({
           clips: stats.total_clips, review: review.total, inflight,
-          races: races.items.length, speakers: speakers.items.length,
+          speakers: speakers.items.length,
           overrides: settings.categories.reduce(
             (n: number, c: any) => n + c.fields.filter((f: any) => f.overridden).length, 0),
         });

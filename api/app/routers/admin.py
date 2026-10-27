@@ -10,7 +10,7 @@ from common.config import (get_settings, get_effective_settings, config_snapshot
                             Settings, TUNABLE_FIELDS, RESTART_TUNABLE_FIELDS,
                             SETTINGS_CATEGORIES, LLM_MODELS)
 from ..auth import get_current_user
-from ..services import agent as agent_svc, ontrack_extract, ontrack_llm
+from ..services import agent as agent_svc, queue
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -191,6 +191,38 @@ async def consolidate_clusters(user=Depends(get_current_user)):
     return result
 
 
+@router.post("/retag")
+async def retag_all(user=Depends(get_current_user)):
+    """Re-derive auto tags for every COMPLETE clip on the worker — after a tagging setting
+    changes, say. Existing tags stay visible until each clip's replacement is written."""
+    job_id = await queue.enqueue_retag(None)
+    await audit("clip.retag", "clip", "all", actor=user)
+    return {"job_id": job_id}
+
+
+@router.post("/maintenance/run")
+async def run_maintenance(user=Depends(get_current_user)):
+    """Run the worker's upkeep pass now rather than at its next scheduled tick."""
+    return {"job_id": await queue.enqueue_maintenance()}
+
+
+@router.get("/maintenance")
+async def maintenance_status(limit: int = 20, user=Depends(get_current_user)):
+    """What the worker's background upkeep has done lately. Read from the audit log, where
+    every pass that changed something records itself — so the answer to "why did this clip
+    disappear / turn FAILED" is the same tamper-evident trail a person's actions leave."""
+    rows = await db.fetch(
+        """SELECT ts, action, object_id, after FROM audit_log
+           WHERE action LIKE 'maintenance.%' ORDER BY id DESC LIMIT $1""", limit)
+    cfg = await get_effective_settings()
+    return {"enabled": cfg.auto_maintenance,
+            "consolidate_clusters": cfg.auto_consolidate_clusters,
+            "retention_days": cfg.retention_days,
+            "untagged": await db.fetchval(
+                "SELECT count(*) FROM clips WHERE status='COMPLETE' AND auto_tags IS NULL"),
+            "recent": [dict(r) for r in rows]}
+
+
 @router.get("/calibration/latest")
 async def latest_calibration(user=Depends(get_current_user)):
     row = await db.fetchrow("SELECT * FROM calibration_runs ORDER BY ran_at DESC LIMIT 1")
@@ -227,47 +259,6 @@ async def rebuild_graph(user=Depends(get_current_user)):
         raise HTTPException(503, str(e)) from e
     await audit("graph.sync", "graph", "neo4j", after={"projected": sent, **got}, actor=user)
     return {"projected": sent, **got}
-
-
-@router.post("/ontrack/extract")
-async def extract_ontrack(force: bool = False, user=Depends(get_current_user)):
-    """Read on-track events out of the corpus (common/ontrack.py).
-
-    Separate from the graph sync on purpose: extraction reads Postgres and writes Postgres,
-    and runs whether or not Neo4j exists. Sync afterwards to project what it found.
-
-    force=false reads only speech that has never been looked at, which is the cheap
-    incremental case after an upload. force=true re-reads everything, which is what a
-    threshold change or a new event type requires.
-    """
-    embedded = await ontrack_extract.backfill_radio_embeddings()
-    result = await ontrack_extract.extract(force=force)
-    await audit("ontrack.extract", "corpus", "speech_events", actor=user, after=result)
-    return {**result, "radio_embedded": embedded}
-
-
-@router.post("/ontrack/refine")
-async def refine_ontrack(user=Depends(get_current_user)):
-    """Re-read the embedding pass's candidates with the configured model.
-
-    Similarity matches topic; the model reads the sentence. That is the whole gap this
-    closes — "Head down." is near a completed overtake in embedding space and obviously
-    encouragement to anything that can read it.
-
-    Sends corpus text off the box, so it needs both llm_enabled and ontrack_llm_enabled,
-    and only lines that already cleared the local candidate bar are sent. 503 when either
-    switch is off, like every other off-box path.
-    """
-    try:
-        cands = await ontrack_extract.candidates()
-        confirmed, failures = await ontrack_llm.adjudicate(cands)
-        stored = await ontrack_extract.store(confirmed, source="llm")
-    except agent_svc.LLMUnavailable as e:
-        raise HTTPException(503, str(e)) from e
-    await audit("ontrack.refine", "corpus", "speech_events", actor=user,
-                 after={"candidates": len(cands), **stored})
-    return {"candidates": len(cands), "confirmed": len(confirmed),
-            "unread_batches": len(failures), "errors": failures[:3], **stored}
 
 
 @router.get("/graph/summary")

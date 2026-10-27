@@ -40,10 +40,12 @@ async def tag_speaker(body: TagBody, user=Depends(get_current_user)):
     from later the way the clip-detail page does it — the embedding the worker already
     computed for this turn is enrolled directly, with no clip_id, which speaker_enrollments
     allows for exactly this reason. Once enrolled, every later chunk's identify() call sees
-    this voice and can match it, live-mic or F1-radio session alike.
+    this voice and can match it in any later live session.
     """
-    if len(body.embedding) != 192:
-        raise HTTPException(400, "embedding must be 192-dimensional")
+    # the width of whatever model the worker embeds with (192 for ECAPA, 256 for ResNet293)
+    dim = await sc.embedding_dim()
+    if dim and len(body.embedding) != dim:
+        raise HTTPException(400, f"embedding must be {dim}-dimensional")
     name = body.display_name.strip()
     if not name:
         raise HTTPException(400, "display_name is required")
@@ -60,4 +62,6 @@ async def tag_speaker(body: TagBody, user=Depends(get_current_user)):
         clip_id=None, source="manual", actor=user)
     await audit_mod.audit("speaker.live_tag", "speaker_profile", profile_id,
                            after={"display_name": name}, actor=user)
+    # a voice named live may already be sitting unnamed in processed clips
+    await queue.enqueue_reidentify()
     return {"profile_id": profile_id, "display_name": name}

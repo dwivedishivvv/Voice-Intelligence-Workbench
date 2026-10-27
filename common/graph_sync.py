@@ -17,7 +17,11 @@ label nothing projects matches zero rows without raising.
 """
 import argparse
 import asyncio
+import time
 import uuid
+from collections import Counter
+from itertools import combinations
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 import structlog
@@ -37,129 +41,104 @@ class Projection(NamedTuple):
     # values so a projection stays a static, testable declaration instead of something
     # that has to be built at call time once a query needs a tunable threshold.
     params: tuple[str, ...] = ()
+    # A boolean Settings field that switches this projection off when false.
+    when: str | None = None
 
 
 # Uniqueness constraints double as indexes, which is what makes the MERGEs below cheap:
 # without them every MERGE is a label scan and the projection degrades quadratically.
 CONSTRAINTS = [
     "CREATE CONSTRAINT utt_id    IF NOT EXISTS FOR (u:Utterance) REQUIRE u.utt_id IS UNIQUE",
+    "CREATE CONSTRAINT speech_id IF NOT EXISTS FOR (s:Speech)    REQUIRE s.speech_id IS UNIQUE",
     "CREATE CONSTRAINT clip_id   IF NOT EXISTS FOR (c:Clip)      REQUIRE c.clip_id IS UNIQUE",
     "CREATE CONSTRAINT spk_id    IF NOT EXISTS FOR (s:Speaker)   REQUIRE s.profile_id IS UNIQUE",
-    "CREATE CONSTRAINT race_id   IF NOT EXISTS FOR (r:Race)      REQUIRE r.race_id IS UNIQUE",
-    "CREATE CONSTRAINT sess_id   IF NOT EXISTS FOR (s:Session)   REQUIRE s.session_key IS UNIQUE",
-    "CREATE CONSTRAINT call_id   IF NOT EXISTS FOR (c:RadioCall) REQUIRE c.call_id IS UNIQUE",
-    "CREATE CONSTRAINT speech_id IF NOT EXISTS FOR (s:Speech)    REQUIRE s.speech_id IS UNIQUE",
-    "CREATE CONSTRAINT team_nm   IF NOT EXISTS FOR (t:Team)      REQUIRE t.name IS UNIQUE",
-    "CREATE CONSTRAINT evt_nm    IF NOT EXISTS FOR (e:EventType) REQUIRE e.name IS UNIQUE",
-    "CREATE CONSTRAINT circ_nm   IF NOT EXISTS FOR (c:Circuit)   REQUIRE c.name IS UNIQUE",
-    "CREATE CONSTRAINT drv_key   IF NOT EXISTS FOR (d:Driver)    REQUIRE (d.session_key, d.number) IS UNIQUE",
-    "CREATE CONSTRAINT lap_key   IF NOT EXISTS FOR (l:Lap)       REQUIRE (l.session_key, l.driver_number, l.number) IS UNIQUE",
+    "CREATE CONSTRAINT voice_id  IF NOT EXISTS FOR (v:Voice)     REQUIRE v.cluster_id IS UNIQUE",
+    "CREATE CONSTRAINT topic_nm  IF NOT EXISTS FOR (t:Topic)     REQUIRE t.name IS UNIQUE",
+    "CREATE CONSTRAINT tag_nm    IF NOT EXISTS FOR (t:Tag)       REQUIRE t.name IS UNIQUE",
+    "CREATE CONSTRAINT lang_code IF NOT EXISTS FOR (l:Language)  REQUIRE l.code IS UNIQUE",
+    "CREATE CONSTRAINT entity_nm IF NOT EXISTS FOR (e:Entity)    REQUIRE e.name IS UNIQUE",
 ]
 
-# Utterance and RadioCall both carry a second `:Speech` label. They are genuinely the same
-# kind of thing — a unit of transcribed speech with a tone read — and differ only in how
-# much of the pipeline has touched them. Modelling that shared identity explicitly is what
-# lets the edges that don't care about the difference (DURING_LAP, MENTIONS) be one
-# projection each instead of one per source label, and gives Phase 3 retrieval a single
-# label to anchor on.
+# The model, in one place:
+#
+#   (:Speaker)  an enrolled person              (:Voice)    an unidentified recurring voice
+#   (:Clip)     a processed recording           (:Utterance:Speech) one diarized turn
+#   (:Topic)    an automatic topic tag          (:Tag)      an operator's own tag
+#   (:Language) a detected language             (:Entity)   a person, company or place
+#                                                           named in the transcripts
+#
+#   (Utterance)-[:IN_CLIP]->(Clip)  (Utterance)-[:SPOKEN_BY]->(Speaker)  (Utterance)-[:NEXT]->
+#   (Speaker)-[:APPEARS_IN]->(Clip)   (Voice)-[:HEARD_IN]->(Clip)
+#   (Speaker)-[:TALKED_WITH]->(Speaker)   (Speaker)-[:DISCUSSED]->(Topic)
+#   (Clip)-[:ABOUT]->(Topic)  (Clip|Speaker)-[:TAGGED]->(Tag)  (Clip)-[:IN_LANGUAGE]->(Language)
+#   (Utterance|Clip)-[:MENTIONS]->(Entity)   (Speaker)-[:MENTIONED]->(Entity)
+#   (Entity)-[:CO_MENTIONED]->(Entity)
 
 NODE_PROJECTIONS = [
     Projection("Speaker", """
-        SELECT id AS profile_id, display_name, status, n_enrollments, total_speech_s
+        SELECT id AS profile_id, display_name, status, n_enrollments, total_speech_s,
+               notes, tags, created_at
         FROM speaker_profiles""", """
         UNWIND $rows AS row
         MERGE (s:Speaker {profile_id: row.profile_id})
         SET s.name = row.display_name, s.status = row.status,
-            s.n_enrollments = row.n_enrollments, s.total_speech_s = row.total_speech_s
+            s.n_enrollments = row.n_enrollments, s.total_speech_s = row.total_speech_s,
+            s.notes = row.notes, s.tags = row.tags, s.created_at = row.created_at
     """),
-    Projection("Race", """
-        SELECT id AS race_id, name, circuit, race_date FROM races""", """
+    # Recurring voices nobody has named yet. A promoted cluster is already a Speaker, and
+    # one no clip voice points at any more (its members were reassigned or reprocessed) is
+    # a stale grouping with nothing to connect to -- it would only float on the map.
+    Projection("Voice", """
+        SELECT k.id AS cluster_id, k.label, k.n_members, k.total_speech_s
+        FROM speaker_clusters k
+        WHERE k.promoted_to IS NULL
+          AND EXISTS (SELECT 1 FROM clip_speakers cs WHERE cs.cluster_id = k.id)""", """
         UNWIND $rows AS row
-        MERGE (r:Race {race_id: row.race_id})
-        SET r.name = row.name, r.circuit = row.circuit, r.race_date = row.race_date
+        MERGE (v:Voice {cluster_id: row.cluster_id})
+        SET v.name = row.label, v.n_members = row.n_members,
+            v.total_speech_s = row.total_speech_s
     """),
     # Only COMPLETE clips: anything else has no finished transcript, and a half-processed
     # clip in the graph is worse than an absent one.
     Projection("Clip", """
-        SELECT id AS clip_id, filename, duration_s, language, n_speakers,
-               sentiment, sentiment_score, mood, recorded_at, created_at
-        FROM clips WHERE status = 'COMPLETE'""", """
+        SELECT c.id AS clip_id, c.filename, c.duration_s, c.language, c.n_speakers,
+               c.needs_review, c.tags, c.created_at, q.grade
+        FROM clips c LEFT JOIN quality_metrics q ON q.clip_id = c.id
+        WHERE c.status = 'COMPLETE'""", """
         UNWIND $rows AS row
         MERGE (c:Clip {clip_id: row.clip_id})
-        SET c.filename = row.filename, c.duration_s = row.duration_s,
+        SET c.name = row.filename, c.filename = row.filename, c.duration_s = row.duration_s,
             c.language = row.language, c.n_speakers = row.n_speakers,
-            c.sentiment = row.sentiment, c.sentiment_score = row.sentiment_score,
-            c.mood = row.mood, c.recorded_at = row.recorded_at, c.created_at = row.created_at
+            c.needs_review = row.needs_review, c.tags = row.tags,
+            c.created_at = row.created_at, c.quality = row.grade
     """),
     Projection("Utterance", """
-        SELECT u.id AS utt_id, u.idx, u.text, u.start_s, u.end_s,
-               u.sentiment, u.sentiment_score, u.text_sentiment, u.mood
+        SELECT u.id AS utt_id, u.idx, u.text, u.start_s, u.end_s, u.mean_word_conf
         FROM utterances u JOIN clips c ON c.id = u.clip_id
         WHERE c.status = 'COMPLETE'""", """
         UNWIND $rows AS row
         MERGE (u:Utterance {utt_id: row.utt_id})
         SET u:Speech, u.speech_id = row.utt_id,
             u.text = row.text, u.idx = row.idx,
-            u.start_s = row.start_s, u.end_s = row.end_s,
-            u.sentiment = row.sentiment, u.sentiment_score = row.sentiment_score,
-            u.text_sentiment = row.text_sentiment, u.mood = row.mood
+            u.start_s = row.start_s, u.end_s = row.end_s, u.asr_conf = row.mean_word_conf
+    """, when="graph_utterance_nodes"),
+    Projection("Topic", """
+        SELECT DISTINCT substr(t, 7) AS name
+        FROM clips c, unnest(c.auto_tags) t
+        WHERE c.status = 'COMPLETE' AND t LIKE 'topic:%'""", """
+        UNWIND $rows AS row MERGE (t:Topic {name: row.name})
     """),
-    # A vocabulary node per event type. Small and closed, which is what makes
-    # (:EventType {name:"overtake_attempt"})<-[:READS_AS]-(:Speech) a one-hop query
-    # instead of a scan for a relationship property.
-    Projection("EventType", """
-        SELECT DISTINCT event_type AS name, family FROM speech_events""", """
-        UNWIND $rows AS row
-        MERGE (e:EventType {name: row.name}) SET e.family = row.family
+    Projection("Tag", """
+        SELECT DISTINCT t AS name FROM (
+          SELECT unnest(c.tags) AS t FROM clips c WHERE c.status = 'COMPLETE'
+          UNION SELECT unnest(tags) FROM speaker_profiles
+        ) x WHERE t <> ''""", """
+        UNWIND $rows AS row MERGE (t:Tag {name: row.name})
     """),
-    Projection("Session", """
-        SELECT session_key, name, session_type, year, date_start, circuit, country
-        FROM f1_sessions""", """
-        UNWIND $rows AS row
-        MERGE (s:Session {session_key: row.session_key})
-        SET s.name = row.name, s.session_type = row.session_type, s.year = row.year,
-            s.date_start = row.date_start, s.circuit = row.circuit, s.country = row.country
-    """),
-    Projection("Circuit", """
-        SELECT DISTINCT circuit AS name, country FROM f1_sessions
-        WHERE circuit IS NOT NULL""", """
-        UNWIND $rows AS row
-        MERGE (c:Circuit {name: row.name}) SET c.country = row.country
-    """),
-    Projection("Team", """
-        SELECT DISTINCT team_name AS name FROM f1_drivers
-        WHERE team_name IS NOT NULL""", """
-        UNWIND $rows AS row MERGE (t:Team {name: row.name})
-    """),
-    Projection("Driver", """
-        SELECT session_key, driver_number, full_name, name_acronym, team_name
-        FROM f1_drivers""", """
-        UNWIND $rows AS row
-        MERGE (d:Driver {session_key: row.session_key, number: row.driver_number})
-        SET d.full_name = row.full_name, d.code = row.name_acronym, d.team = row.team_name
-    """),
-    Projection("Lap", """
-        SELECT session_key, driver_number, lap_number, date_start, lap_duration, is_pit_out
-        FROM f1_laps""", """
-        UNWIND $rows AS row
-        MERGE (l:Lap {session_key: row.session_key, driver_number: row.driver_number,
-                      number: row.lap_number})
-        SET l.date_start = row.date_start, l.duration_s = row.lap_duration,
-            l.is_pit_out = row.is_pit_out
-    """),
-    # Radio calls get their own primary label rather than being Clips: until one is put
-    # through the full pipeline it has no clip row, no diarization and no utterances —
-    # only a transcript and a tone read. Calling that a Clip would mean a Clip node with
-    # none of a Clip's relationships. radio_calls.clip_id is the seam if they are ever
-    # pipelined; the shared :Speech label is what lets the rest of the graph ignore the
-    # distinction where it doesn't matter.
-    Projection("RadioCall", """
-        SELECT id AS call_id, text, mood, recorded_at FROM radio_calls
-        WHERE analyzed_at IS NOT NULL AND error IS NULL""", """
-        UNWIND $rows AS row
-        MERGE (c:RadioCall {call_id: row.call_id})
-        SET c:Speech, c.speech_id = row.call_id,
-            c.text = row.text, c.mood = row.mood, c.recorded_at = row.recorded_at
+    Projection("Language", """
+        SELECT DISTINCT language AS code FROM clips c
+        WHERE c.status = 'COMPLETE' AND language IS NOT NULL""", """
+        UNWIND $rows AS row MERGE (l:Language {code: row.code}) SET l.name = row.code
     """),
 ]
 
@@ -170,15 +149,20 @@ REL_PROJECTIONS = [
         UNWIND $rows AS row
         MATCH (u:Utterance {utt_id: row.utt_id}), (c:Clip {clip_id: row.clip_id})
         MERGE (u)-[:IN_CLIP]->(c)
-    """),
+    """, when="graph_utterance_nodes"),
+    # Speaker resolution matches the rest of the codebase: clip_speakers is the
+    # authoritative identity row and utterances.profile_id can lag it.
     Projection("SPOKEN_BY", """
-        SELECT u.id AS utt_id, u.profile_id FROM utterances u
+        SELECT u.id AS utt_id, coalesce(u.profile_id, cs.profile_id) AS profile_id
+        FROM utterances u
         JOIN clips c ON c.id = u.clip_id
-        WHERE c.status = 'COMPLETE' AND u.profile_id IS NOT NULL""", """
+        LEFT JOIN clip_speakers cs ON cs.clip_id = u.clip_id AND cs.local_label = u.local_label
+        WHERE c.status = 'COMPLETE'
+          AND coalesce(u.profile_id, cs.profile_id) IS NOT NULL""", """
         UNWIND $rows AS row
         MATCH (u:Utterance {utt_id: row.utt_id}), (s:Speaker {profile_id: row.profile_id})
         MERGE (u)-[:SPOKEN_BY]->(s)
-    """),
+    """, when="graph_utterance_nodes"),
     # Conversational order. Built with LAG in SQL rather than by sorting in Cypher: the
     # window function is the natural way to say "the previous utterance in this clip",
     # and it leaves the Cypher a flat pairwise MERGE.
@@ -190,143 +174,33 @@ REL_PROJECTIONS = [
         UNWIND $rows AS row
         MATCH (a:Utterance {utt_id: row.a}), (b:Utterance {utt_id: row.b})
         MERGE (a)-[:NEXT]->(b)
-    """),
-    Projection("IN_RACE", """
-        SELECT id AS clip_id, race_id FROM clips
-        WHERE race_id IS NOT NULL AND status = 'COMPLETE'""", """
+    """, when="graph_utterance_nodes"),
+    # Who is in which recording, and how much of it they carry.
+    Projection("APPEARS_IN", """
+        SELECT cs.profile_id, cs.clip_id, cs.speech_s, cs.n_turns, cs.talk_share,
+               cs.match_result::text AS match_result, cs.match_score
+        FROM clip_speakers cs JOIN clips c ON c.id = cs.clip_id
+        WHERE c.status = 'COMPLETE' AND cs.profile_id IS NOT NULL""", """
         UNWIND $rows AS row
-        MATCH (c:Clip {clip_id: row.clip_id}), (r:Race {race_id: row.race_id})
-        MERGE (c)-[:IN_RACE]->(r)
+        MATCH (s:Speaker {profile_id: row.profile_id}), (c:Clip {clip_id: row.clip_id})
+        MERGE (s)-[r:APPEARS_IN]->(c)
+        SET r.speech_s = row.speech_s, r.n_turns = row.n_turns, r.talk_share = row.talk_share,
+            r.match = row.match_result, r.score = row.match_score
     """),
-    Projection("PART_OF", """
-        SELECT id AS race_id, session_key FROM races WHERE session_key IS NOT NULL""", """
+    Projection("HEARD_IN", """
+        SELECT cs.cluster_id, cs.clip_id, cs.speech_s, cs.talk_share
+        FROM clip_speakers cs JOIN clips c ON c.id = cs.clip_id
+        WHERE c.status = 'COMPLETE' AND cs.profile_id IS NULL
+          AND cs.cluster_id IS NOT NULL""", """
         UNWIND $rows AS row
-        MATCH (s:Session {session_key: row.session_key}), (r:Race {race_id: row.race_id})
-        MERGE (s)-[:PART_OF]->(r)
+        MATCH (v:Voice {cluster_id: row.cluster_id}), (c:Clip {clip_id: row.clip_id})
+        MERGE (v)-[r:HEARD_IN]->(c)
+        SET r.speech_s = row.speech_s, r.talk_share = row.talk_share
     """),
-    Projection("AT", """
-        SELECT session_key, circuit FROM f1_sessions WHERE circuit IS NOT NULL""", """
-        UNWIND $rows AS row
-        MATCH (s:Session {session_key: row.session_key}), (c:Circuit {name: row.circuit})
-        MERGE (s)-[:AT]->(c)
-    """),
-    Projection("DRIVES_FOR", """
-        SELECT session_key, driver_number, team_name FROM f1_drivers
-        WHERE team_name IS NOT NULL""", """
-        UNWIND $rows AS row
-        MATCH (d:Driver {session_key: row.session_key, number: row.driver_number}),
-              (t:Team {name: row.team_name})
-        MERGE (d)-[:DRIVES_FOR]->(t)
-    """),
-    Projection("DROVE_IN", """
-        SELECT session_key, driver_number FROM f1_drivers""", """
-        UNWIND $rows AS row
-        MATCH (d:Driver {session_key: row.session_key, number: row.driver_number}),
-              (s:Session {session_key: row.session_key})
-        MERGE (d)-[:DROVE_IN]->(s)
-    """),
-    # The edge that makes a driver and a recognized voice the same entity. Rare on
-    # purpose: f1_drivers.profile_id is only set once that driver has been enrolled.
-    Projection("VOICE_OF", """
-        SELECT session_key, driver_number, profile_id FROM f1_drivers
-        WHERE profile_id IS NOT NULL""", """
-        UNWIND $rows AS row
-        MATCH (d:Driver {session_key: row.session_key, number: row.driver_number}),
-              (s:Speaker {profile_id: row.profile_id})
-        MERGE (d)-[:VOICE_OF]->(s)
-    """),
-    # One query, two edges: a lap's driver and its session come from the same row, so
-    # splitting them would run the identical scan twice.
-    Projection("LAP_EDGES", """
-        SELECT session_key, driver_number, lap_number FROM f1_laps""", """
-        UNWIND $rows AS row
-        MATCH (l:Lap {session_key: row.session_key, driver_number: row.driver_number,
-                      number: row.lap_number}),
-              (d:Driver {session_key: row.session_key, number: row.driver_number}),
-              (s:Session {session_key: row.session_key})
-        MERGE (l)-[:BY]->(d)
-        MERGE (l)-[:IN]->(s)
-    """),
-    # The temporal spine: lap N -> lap N+1, per driver per session. Phase 3's "lap +/- 2"
-    # neighbourhood expansion walks this.
-    Projection("LAP_NEXT", """
-        SELECT session_key, driver_number, a, b FROM (
-          SELECT session_key, driver_number,
-                 LAG(lap_number) OVER (PARTITION BY session_key, driver_number
-                                       ORDER BY lap_number) AS a,
-                 lap_number AS b
-          FROM f1_laps
-        ) p WHERE a IS NOT NULL""", """
-        UNWIND $rows AS row
-        MATCH (a:Lap {session_key: row.session_key, driver_number: row.driver_number, number: row.a}),
-              (b:Lap {session_key: row.session_key, driver_number: row.driver_number, number: row.b})
-        MERGE (a)-[:NEXT]->(b)
-    """),
-    Projection("CALL_IN_SESSION", """
-        SELECT id AS call_id, session_key FROM radio_calls
-        WHERE analyzed_at IS NOT NULL AND error IS NULL AND session_key IS NOT NULL""", """
-        UNWIND $rows AS row
-        MATCH (c:RadioCall {call_id: row.call_id}), (s:Session {session_key: row.session_key})
-        MERGE (c)-[:IN_SESSION]->(s)
-    """),
-    Projection("CALL_BY_DRIVER", """
-        SELECT id AS call_id, session_key, driver_number FROM radio_calls
-        WHERE analyzed_at IS NOT NULL AND error IS NULL
-          AND session_key IS NOT NULL AND driver_number IS NOT NULL""", """
-        UNWIND $rows AS row
-        MATCH (c:RadioCall {call_id: row.call_id}),
-              (d:Driver {session_key: row.session_key, number: row.driver_number})
-        MERGE (c)-[:BY_DRIVER]->(d)
-    """),
-    # --- Phase 2 ------------------------------------------------------------------
-    # The edge the whole graph exists for: what was said, on which lap. One projection
-    # over both kinds of speech, via the shared :Speech label.
-    #
-    # Radio calls carry their own wall-clock time from OpenF1. Utterances have to derive
-    # one (clip.recorded_at + start_s) and additionally need the clip filed under a race
-    # bound to a session, and the speaker enrolled as a driver — so in practice almost all
-    # of these edges come from radio today. That is the honest state of the data, not a
-    # gap to paper over: a manually uploaded clip with no recorded_at has no place on a
-    # lap timeline and gets no edge.
-    #
-    # Speech inside the tolerance window of a lap boundary links to *both* laps. Two edges
-    # says "it was around here"; picking the nearer one would assert a precision the
-    # timestamps do not have.
-    Projection("DURING_LAP", """
-        WITH speech AS (
-          SELECT rc.id AS speech_id, rc.session_key, rc.driver_number, rc.recorded_at AS ts
-          FROM radio_calls rc
-          WHERE rc.analyzed_at IS NOT NULL AND rc.error IS NULL
-            AND rc.recorded_at IS NOT NULL
-            AND rc.session_key IS NOT NULL AND rc.driver_number IS NOT NULL
-          UNION ALL
-          SELECT u.id, r.session_key, fd.driver_number,
-                 c.recorded_at + make_interval(secs => u.start_s)
-          FROM utterances u
-          JOIN clips c   ON c.id = u.clip_id
-          JOIN races r   ON r.id = c.race_id
-          JOIN f1_drivers fd ON fd.session_key = r.session_key AND fd.profile_id = u.profile_id
-          WHERE c.status = 'COMPLETE' AND c.recorded_at IS NOT NULL
-            AND r.session_key IS NOT NULL AND u.profile_id IS NOT NULL
-        )
-        SELECT sp.speech_id, l.session_key, l.driver_number, l.lap_number
-        FROM speech sp
-        JOIN f1_laps l
-          ON l.session_key   = sp.session_key
-         AND l.driver_number = sp.driver_number
-         AND l.date_start IS NOT NULL AND l.lap_duration IS NOT NULL
-         AND sp.ts >= l.date_start - make_interval(secs => $1)
-         AND sp.ts <  l.date_start + make_interval(secs => l.lap_duration + $1)""", """
-        UNWIND $rows AS row
-        MATCH (sp:Speech {speech_id: row.speech_id}),
-              (l:Lap {session_key: row.session_key, driver_number: row.driver_number,
-                      number: row.lap_number})
-        MERGE (sp)-[:DURING_LAP]->(l)
-    """, params=("graph_lap_match_tolerance_s",)),
     # Who talks to whom, from co-occurrence in the same clip. Undirected in meaning, so
     # only the a<b half is stored — the other direction is the same fact written twice.
     Projection("TALKED_WITH", """
-        SELECT a.profile_id AS a, b.profile_id AS b, count(*)::int AS n_clips
+        SELECT a.profile_id AS a, b.profile_id AS b, count(DISTINCT a.clip_id)::int AS n_clips
         FROM clip_speakers a
         JOIN clip_speakers b ON b.clip_id = a.clip_id AND a.profile_id < b.profile_id
         JOIN clips c ON c.id = a.clip_id
@@ -337,73 +211,89 @@ REL_PROJECTIONS = [
         MATCH (x:Speaker {profile_id: row.a}), (y:Speaker {profile_id: row.b})
         MERGE (x)-[t:TALKED_WITH]->(y) SET t.n_clips = row.n_clips
     """),
-    # READS_AS, not IS: the edge records how a line was read by a similarity classifier
-    # over one sentence of ASR output, and carries the score so a reader can discount it.
-    # Calling it anything stronger would let a model state an inference as a fact.
-    Projection("READS_AS", """
-        SELECT coalesce(e.utterance_id, e.radio_call_id)::text AS speech_id,
-               e.event_type, e.family, e.score, e.margin
-          FROM speech_events e""", """
+    Projection("ABOUT", """
+        SELECT c.id AS clip_id, substr(t, 7) AS topic
+        FROM clips c, unnest(c.auto_tags) t
+        WHERE c.status = 'COMPLETE' AND t LIKE 'topic:%'""", """
         UNWIND $rows AS row
-        MATCH (sp:Speech {speech_id: row.speech_id}), (t:EventType {name: row.event_type})
-        MERGE (sp)-[r:READS_AS]->(t)
-        SET r.score = row.score, r.margin = row.margin, r.family = row.family
+        MATCH (c:Clip {clip_id: row.clip_id}), (t:Topic {name: row.topic})
+        MERGE (c)-[:ABOUT]->(t)
     """),
-    # The other car, when the line named exactly one. This is the movement-between-cars
-    # edge: it is what turns "who was anyone trying to pass" into a graph traversal.
-    Projection("INVOLVES", """
-        SELECT coalesce(e.utterance_id, e.radio_call_id)::text AS speech_id,
-               e.target_session_key AS session_key, e.target_driver_number AS number,
-               e.event_type, e.score
-          FROM speech_events e
-         WHERE e.target_driver_number IS NOT NULL AND e.target_session_key IS NOT NULL""", """
+    # A speaker discussed a topic when they spoke in a recording about it. Weighted by how
+    # many such recordings, so a person's recurring subjects draw heavier on the map.
+    Projection("DISCUSSED", """
+        SELECT cs.profile_id, substr(t, 7) AS topic, count(DISTINCT c.id)::int AS n_clips
+        FROM clip_speakers cs
+        JOIN clips c ON c.id = cs.clip_id
+        CROSS JOIN LATERAL unnest(c.auto_tags) t
+        WHERE c.status = 'COMPLETE' AND cs.profile_id IS NOT NULL AND t LIKE 'topic:%'
+        GROUP BY cs.profile_id, substr(t, 7)""", """
         UNWIND $rows AS row
-        MATCH (sp:Speech {speech_id: row.speech_id}),
-              (d:Driver {session_key: row.session_key, number: row.number})
-        MERGE (sp)-[r:INVOLVES]->(d)
-        SET r.event_type = row.event_type, r.score = row.score
+        MATCH (s:Speaker {profile_id: row.profile_id}), (t:Topic {name: row.topic})
+        MERGE (s)-[r:DISCUSSED]->(t) SET r.n_clips = row.n_clips
+    """),
+    Projection("CLIP_TAGGED", """
+        SELECT c.id AS clip_id, unnest(c.tags) AS tag FROM clips c
+        WHERE c.status = 'COMPLETE'""", """
+        UNWIND $rows AS row
+        MATCH (c:Clip {clip_id: row.clip_id}), (t:Tag {name: row.tag})
+        MERGE (c)-[:TAGGED]->(t)
+    """),
+    Projection("SPEAKER_TAGGED", """
+        SELECT id AS profile_id, unnest(tags) AS tag FROM speaker_profiles""", """
+        UNWIND $rows AS row
+        MATCH (s:Speaker {profile_id: row.profile_id}), (t:Tag {name: row.tag})
+        MERGE (s)-[:TAGGED]->(t)
+    """),
+    Projection("IN_LANGUAGE", """
+        SELECT c.id AS clip_id, c.language FROM clips c
+        WHERE c.status = 'COMPLETE' AND c.language IS NOT NULL""", """
+        UNWIND $rows AS row
+        MATCH (c:Clip {clip_id: row.clip_id}), (l:Language {code: row.language})
+        MERGE (c)-[:IN_LANGUAGE]->(l)
     """),
 ]
 
 PROJECTIONS = NODE_PROJECTIONS + REL_PROJECTIONS
 
-# MENTIONS is projected separately because the rows come from the Python matcher in
-# common/entities.py rather than from a single query — see _mention_rows(). One Cypher per
-# entity type, because a Cypher label cannot be parameterised.
-MENTION_CYPHER = {
-    # Session-scoped: the same surname maps to different car numbers across seasons, so
-    # which Driver node is meant is decided by the session the speech belongs to.
-    "driver": """
+# Entities come from the Python extractor in common/entities.py rather than a single query,
+# so they are projected separately -- see _entity_rows(). Dict order is write order: the
+# Entity nodes go in before the edges that MATCH them.
+ENTITY_CYPHER = {
+    "Entity": """
         UNWIND $rows AS row
-        MATCH (sp:Speech {speech_id: row.speech_id}),
-              (d:Driver {session_key: row.session_key, number: row.entity_number})
-        MERGE (sp)-[:MENTIONS]->(d)
+        MERGE (e:Entity {name: row.name}) SET e.kind = row.kind, e.n_mentions = row.n
     """,
-    "team": """
+    "UTT_MENTIONS": """
         UNWIND $rows AS row
-        MATCH (sp:Speech {speech_id: row.speech_id}), (t:Team {name: row.entity_key})
-        MERGE (sp)-[:MENTIONS]->(t)
+        MATCH (u:Utterance {utt_id: row.speech_id}), (e:Entity {name: row.entity})
+        MERGE (u)-[:MENTIONS]->(e)
     """,
-    "circuit": """
+    "CLIP_MENTIONS": """
         UNWIND $rows AS row
-        MATCH (sp:Speech {speech_id: row.speech_id}), (c:Circuit {name: row.entity_key})
-        MERGE (sp)-[:MENTIONS]->(c)
+        MATCH (c:Clip {clip_id: row.clip_id}), (e:Entity {name: row.entity})
+        MERGE (c)-[r:MENTIONS]->(e) SET r.n = row.n
+    """,
+    "SPEAKER_MENTIONED": """
+        UNWIND $rows AS row
+        MATCH (s:Speaker {profile_id: row.profile_id}), (e:Entity {name: row.entity})
+        MERGE (s)-[r:MENTIONED]->(e) SET r.n = row.n
+    """,
+    # Named in the same recording. Stored a<b, like TALKED_WITH.
+    "CO_MENTIONED": """
+        UNWIND $rows AS row
+        MATCH (a:Entity {name: row.a}), (b:Entity {name: row.b})
+        MERGE (a)-[r:CO_MENTIONED]->(b) SET r.n_clips = row.n_clips
     """,
 }
 
-# Every unit of transcribed speech, with the session it belongs to where one is known.
-# session_key is null for clips outside a race; those can still mention a team or a
-# circuit, just not a session-scoped driver.
+# Every unit of transcribed speech with its clip and, where known, its speaker.
 SPEECH_TEXT_SQL = """
-    SELECT rc.id AS speech_id, rc.session_key, rc.text
-    FROM radio_calls rc
-    WHERE rc.analyzed_at IS NOT NULL AND rc.error IS NULL
-      AND rc.text IS NOT NULL AND rc.text <> ''
-    UNION ALL
-    SELECT u.id, r.session_key, u.text
+    SELECT u.id AS speech_id, u.clip_id, coalesce(u.profile_id, cs.profile_id) AS profile_id,
+           u.text
     FROM utterances u
     JOIN clips c ON c.id = u.clip_id
-    LEFT JOIN races r ON r.id = c.race_id
+    LEFT JOIN clip_speakers cs ON cs.clip_id = u.clip_id AND cs.local_label = u.local_label
     WHERE c.status = 'COMPLETE' AND u.text IS NOT NULL AND u.text <> ''
 """
 
@@ -416,47 +306,35 @@ def _rows(records) -> list[dict]:
             for r in records]
 
 
-async def refresh_aliases() -> int:
-    """Re-derive the 'auto' half of f1_aliases from current driver/session data.
+def entity_rows(speech: list[dict], min_mentions: int) -> dict[str, list[dict]]:
+    """Every row each ENTITY_CYPHER statement takes, from the transcripts. Pure, so it is
+    testable without either database."""
+    found = entities.extract([r["text"] for r in speech], min_mentions)
+    known = {name.lower(): name for name in found}
 
-    Deleted and rebuilt rather than topped up. Insert-only seeding leaves yesterday's
-    vocabulary behind forever: a driver who leaves the grid keeps their alias, and a
-    tightening of the seeding rules (as when 3-letter codes were dropped for producing
-    false matches) never actually takes effect on an existing database.
+    utt, by_clip, by_speaker = [], Counter(), Counter()
+    clip_entities: dict[str, set[str]] = {}
+    for r in speech:
+        for name in entities.mentions(r["text"], known):
+            utt.append({"speech_id": r["speech_id"], "entity": name})
+            by_clip[(r["clip_id"], name)] += 1
+            clip_entities.setdefault(r["clip_id"], set()).add(name)
+            if r.get("profile_id"):
+                by_speaker[(r["profile_id"], name)] += 1
 
-    'manual' rows — the ASR mishearings and nicknames that are the whole reason the table
-    is editable — are never touched, and win over an auto row for the same triple via the
-    ON CONFLICT DO NOTHING in each seed statement."""
-    await db.execute("DELETE FROM f1_aliases WHERE source = 'auto'")
-    for sql in entities.SEED_ALIASES_SQL:
-        await db.execute(sql)
-    return await db.fetchval("SELECT count(*) FROM f1_aliases")
+    pairs: Counter = Counter()
+    for names in clip_entities.values():
+        for a, b in combinations(sorted(names), 2):
+            pairs[(a, b)] += 1
 
-
-async def _mention_rows() -> dict[str, list[dict]]:
-    """Run the alias matcher over every transcript, bucketed by entity type."""
-    alias_rows = await db.fetch("SELECT alias, entity_type, entity_key FROM f1_aliases")
-    table: entities.AliasTable = {}
-    for r in alias_rows:
-        table.setdefault(r["alias"], []).append((r["entity_type"], r["entity_key"]))
-    compiled = entities.compile_aliases(table)
-
-    out: dict[str, list[dict]] = {k: [] for k in MENTION_CYPHER}
-    for r in await db.fetch(SPEECH_TEXT_SQL):
-        for entity_type, entity_key in entities.find_mentions(r["text"], compiled):
-            if entity_type not in out:
-                continue
-            if entity_type == "driver":
-                # Needs a session to disambiguate, and a numeric car number to match on.
-                if r["session_key"] is None or not entity_key.isdigit():
-                    continue
-                out["driver"].append({"speech_id": str(r["speech_id"]),
-                                      "session_key": r["session_key"],
-                                      "entity_number": int(entity_key)})
-            else:
-                out[entity_type].append({"speech_id": str(r["speech_id"]),
-                                         "entity_key": entity_key})
-    return out
+    return {
+        "Entity": [{"name": n, "kind": e["kind"], "n": e["n"]} for n, e in found.items()],
+        "UTT_MENTIONS": utt,
+        "CLIP_MENTIONS": [{"clip_id": c, "entity": e, "n": n} for (c, e), n in by_clip.items()],
+        "SPEAKER_MENTIONED": [{"profile_id": p, "entity": e, "n": n}
+                              for (p, e), n in by_speaker.items()],
+        "CO_MENTIONED": [{"a": a, "b": b, "n_clips": n} for (a, b), n in pairs.items()],
+    }
 
 
 async def rebuild(cfg=None) -> dict:
@@ -464,7 +342,7 @@ async def rebuild(cfg=None) -> dict:
 
     ponytail: full rebuild only, no incremental mode. At a few thousand clips this is
     seconds, and `--since` would need change-tracking timestamps on tables that have none
-    (f1_drivers, f1_laps). Add it when a full pass stops being fast enough — the
+    (clip_speakers, speaker_clusters). Add it when a full pass stops being fast enough — the
     projection statements themselves would not change, only their WHERE clauses.
     """
     cfg = cfg or await get_effective_settings()
@@ -477,23 +355,49 @@ async def rebuild(cfg=None) -> dict:
     # `MATCH (n) CALL { WITH n DETACH DELETE n } IN TRANSACTIONS OF 10000 ROWS`.
     await graph.run("MATCH (n) DETACH DELETE n")
 
-    counts: dict[str, int] = {"aliases": await refresh_aliases()}
+    counts: dict[str, int] = {}
     for p in PROJECTIONS:
+        if p.when and not getattr(cfg, p.when):
+            continue
         args = [getattr(cfg, name) for name in p.params]
         counts[p.name] = await graph.write(p.cypher, _rows(await db.fetch(p.sql, *args)))
 
-    for entity_type, rows in (await _mention_rows()).items():
-        counts[f"MENTIONS_{entity_type.upper()}"] = await graph.write(
-            MENTION_CYPHER[entity_type], rows)
+    speech = _rows(await db.fetch(SPEECH_TEXT_SQL))
+    for name, rows in entity_rows(speech, cfg.graph_entity_min_mentions).items():
+        if name == "UTT_MENTIONS" and not cfg.graph_utterance_nodes:
+            continue
+        counts[name] = await graph.write(ENTITY_CYPHER[name], rows)
 
     return counts
 
 
-async def resync() -> None:
+SYNC_JOB = "graph_sync_job"
+
+
+async def schedule(redis, debounce_s: float) -> None:
+    """Ask the worker for a rebuild, coalesced with every other request in the same window.
+
+    Every request inside one `debounce_s` window maps to the same arq job id, deferred to the
+    end of that window, and arq drops a second enqueue of an id it already holds — so a
+    burst of fifty completions costs one rebuild instead of fifty. A request that lands while
+    a window's rebuild is already running falls into the *next* window, so nothing written
+    after a rebuild started is ever left out of the graph.
+    """
+    window = max(float(debounce_s), 1.0)
+    bucket = int(time.time() // window)
+    await redis.enqueue_job(
+        SYNC_JOB, _job_id=f"graph-sync-{bucket}",
+        _defer_until=datetime.fromtimestamp((bucket + 1) * window, tz=timezone.utc))
+
+
+async def resync(redis=None) -> None:
     """Best-effort rebuild after a mutation that changes graph identity: a speaker
-    rename/merge/delete, or a clip/race delete. Without this the graph keeps citing a
+    rename/merge/delete, or a clip delete. Without this the graph keeps citing a
     name or an id a human just explicitly corrected or removed, and stays wrong until
     the next clip completes or someone hits the admin sync button.
+
+    With an arq `redis`, the rebuild is scheduled on the worker (see schedule()) and the
+    request returns at once instead of waiting out a full re-projection.
 
     Same posture as worker/pipeline.py's _sync_graph: Neo4j is a derived read model
     (GRAPH_RAG_PLAN.md), so a down or slow graph must never fail the request that
@@ -501,6 +405,12 @@ async def resync() -> None:
     cfg = await get_effective_settings()
     if not cfg.graph_enabled:
         return
+    if redis is not None:
+        try:
+            await schedule(redis, cfg.graph_sync_debounce_s)
+            return
+        except Exception as e:
+            log.warning("graph_resync_schedule_failed", error=str(e)[:200])
     try:
         await rebuild(cfg)
     except GraphUnavailable:

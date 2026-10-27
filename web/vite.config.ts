@@ -14,7 +14,8 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       // shorthand string form doesn't upgrade websockets — /v1/ws/jobs/* needs ws:true
-      "/v1": { target: "http://localhost:8000", ws: true },
+      // API_URL is set to http://api:8000 in Docker compose; falls back to localhost for native dev.
+      "/v1": { target: process.env.API_URL ?? "http://localhost:8000", ws: true },
     },
   },
 });

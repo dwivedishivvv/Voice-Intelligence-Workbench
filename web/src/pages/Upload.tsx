@@ -62,8 +62,6 @@ export default function Upload() {
   // initial state would erase the batch before it is restored.
   const [restoring, setRestoring] = useState(true);
   const [dragging, setDragging] = useState(false);
-  const [races, setRaces] = useState<any[]>([]);
-  const [raceId, setRaceId] = useState("");
   const [running, setRunning] = useState(false);
   const [batchStart, setBatchStart] = useState<Date | null>(null);
   const [reject, setReject] = useState<Item | null>(null);
@@ -74,7 +72,6 @@ export default function Upload() {
     setItems((prev) => prev.map((i) => (i.key === key ? { ...i, ...p } : i)));
   }, []);
 
-  useEffect(() => { api.listRaces().then((r) => setRaces(r.items)).catch(() => {}); }, []);
 
   // Persist on every change. The File is stripped: it cannot be serialised, and a row that
   // claims to hold a file it no longer has is worse than an honest gap.
@@ -159,9 +156,7 @@ export default function Upload() {
   function processOne(item: Item) {
     return new Promise<void>(async (resolve) => {
       try {
-        const res = raceId
-          ? await api.uploadRaceClip(raceId, item.file!)
-          : await api.uploadClip(item.file!);
+        const res = await api.uploadClip(item.file!);
         patch(item.key, { clipId: res.clip_id });
         if (res.duplicate) {
           patch(item.key, {
@@ -285,13 +280,6 @@ export default function Upload() {
           <span className="kicker-sm" style={{ color: muted(55) }}>
             Applies to every file in this batch
           </span>
-          <div className="field">
-            <label>Add to race</label>
-            <select className="input" value={raceId} onChange={(e) => setRaceId(e.target.value)}>
-              <option value="">None</option>
-              {races.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-            </select>
-          </div>
           <button className="btn btn-primary" disabled={!counts.queued || running} onClick={runBatch}>
             {running ? "Processing…" : `Process ${counts.queued || ""} file${counts.queued === 1 ? "" : "s"}`}
           </button>

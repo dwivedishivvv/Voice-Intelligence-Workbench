@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import { Dialog } from "@/components/dialog";
 import { ModelsPanel } from "@/components/models-panel";
 import { AskAIPanel } from "@/components/ask-ai-panel";
+import { AutomationPanel } from "@/components/automation-panel";
 import { AMBER_INK, muted, num, tagTone } from "@/lib/ui";
 
 type Field = {
@@ -29,7 +30,18 @@ const HELP: Record<string, string> = {
   auto_enroll_min_sim: "Similarity required to auto-enrol. Inert while auto_enroll is off.",
   asr_language: "auto runs language detection; anything else pins it. A typo here silently transcribes in the wrong language.",
   reliability_fair: "The floor under which identification is not attempted at all.",
-  retention_days: "How long processed audio survives before the retention sweep removes it.",
+  retention_days: "How long processed audio survives before the retention sweep removes it. 0 keeps everything; the sweep runs every five minutes while automatic maintenance is on.",
+  diar_recluster_threshold: "Re-decides who-is-who in each recording with the stronger voice model, keeping the diarizer's turn boundaries. Halved diarization error on test conversations. Raise it if separate people get merged into one voice; lower it if one person is split in two. 0 turns it off.",
+  asr_batch_size: "Recordings past the length below are transcribed this many 30-second windows at a time on GPU (about 2x faster on long audio). Doubtful windows are re-done the careful way. 0 turns batching off; lower it if long clips hit GPU memory errors.",
+  asr_batched_min_s: "Shortest recording that uses batched transcription. Anything shorter fits in one window and gains nothing from batching.",
+  denoise_skip_snr_db: "Recordings already this clean skip noise reduction — the slowest non-model step, and one that buys nothing on clean audio. 0 always denoises.",
+  auto_tag_enabled: "Tag every processed clip from its own analysis: language, voices, named speakers, quality caveats and topics.",
+  auto_tag_max_topics: "Topic keyphrases per clip (English transcripts only). 0 turns topic tags off and keeps the rest.",
+  auto_tag_min_topic_sim: "How close a phrase must sit to the clip's overall meaning before it becomes a topic tag. Raise it for fewer, surer topics.",
+  auto_maintenance: "Every five minutes: fail clips a lost worker left mid-pipeline, re-queue clips whose job vanished, enforce retention, and tag untagged clips. Each change is audited.",
+  auto_consolidate_clusters: "Also merge unnamed voice clusters that are the same person, at the strict merge threshold. Off by default — it rewrites past cluster assignments.",
+  stalled_after_s: "A clip whose run started this long ago and never finished is treated as lost with its worker.",
+  graph_sync_debounce_s: "Graph rebuilds requested within this window are merged into one, so a batch upload rebuilds once rather than once per clip.",
 };
 
 export default function Settings() {
@@ -191,6 +203,8 @@ export default function Settings() {
           </span>
         </div>
       )}
+
+      {tab === "Tagging & automation" && <AutomationPanel />}
 
       {category && (
         <section style={{

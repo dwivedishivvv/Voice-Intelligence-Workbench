@@ -43,8 +43,10 @@ CATALOG = {
         "settings_field": "embed_model",
         "gated": False,
         "options": [
+            {"repo_id": "Wespeaker/wespeaker-voxceleb-resnet293-LM", "dir_name": "wespeaker-resnet293",
+             "label": "WeSpeaker ResNet293", "note": "Default. ~3x fewer cross-recording errors than ECAPA on noisy or mismatched audio. 256-dim, ~134MB."},
             {"repo_id": "speechbrain/spkrec-ecapa-voxceleb", "dir_name": "ecapa",
-             "label": "ECAPA-TDNN", "note": "Default. Strong general-purpose speaker embeddings.",
+             "label": "ECAPA-TDNN", "note": "Previous default, 192-dim. Switching models re-embeds every stored voice at the next worker start.",
              "depends_on": ["speechbrain/spkrec-ecapa-voxceleb"]},
             {"repo_id": "speechbrain/spkrec-xvect-voxceleb", "dir_name": "xvect",
              "label": "X-Vector", "note": "Older architecture, smaller, less discriminative.",
@@ -61,18 +63,6 @@ CATALOG = {
              "label": "MiniLM (English)", "note": "384-dim, smaller and faster, English-only."},
             {"repo_id": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2", "dir_name": "mpnet-multilingual",
              "label": "Multilingual MPNet", "note": "768-dim, higher quality, ~3x slower than MiniLM."},
-        ],
-    },
-    "sentiment": {
-        "settings_field": "sentiment_model",
-        "gated": False,
-        "options": [
-            {"repo_id": "cardiffnlp/twitter-xlm-roberta-base-sentiment", "dir_name": "xlmr-sentiment",
-             "label": "XLM-R Sentiment", "note": "Default. Multilingual, 3-class, ~1.1GB."},
-            {"repo_id": "cardiffnlp/twitter-roberta-base-sentiment-latest", "dir_name": "roberta-sentiment-en",
-             "label": "RoBERTa Sentiment (English)", "note": "~500MB, more accurate on English, English-only."},
-            {"repo_id": "tabularisai/multilingual-sentiment-analysis", "dir_name": "distil-sentiment-5class",
-             "label": "5-class Multilingual", "note": "Very negative to very positive. Smaller and faster; label set is remapped to 3 classes."},
         ],
     },
 }

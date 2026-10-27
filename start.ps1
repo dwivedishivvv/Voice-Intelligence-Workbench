@@ -19,8 +19,8 @@ $root = $PSScriptRoot
 $env:MODEL_DIR            = "C:/models"
 $env:HF_HOME              = "C:/models/.cache"
 $env:PYANNOTE_CACHE       = "C:/models/.cache/hub"   # pyannote ignores HF_HOME
-$env:HF_HUB_OFFLINE       = "1"
-$env:TRANSFORMERS_OFFLINE = "1"
+$env:HF_HUB_OFFLINE       = "0"
+$env:TRANSFORMERS_OFFLINE = "0"
 $env:PYTHONPATH           = $root
 
 $APP_PORTS = 8000, 5174
@@ -90,13 +90,21 @@ if ($Stop) {
 
 # ---- datastores ----------------------------------------------------------
 Write-Host "starting postgres + redis..." -ForegroundColor Cyan
-docker compose -f "$root/docker-compose.yml" up -d
-if ($LASTEXITCODE -ne 0) { throw "docker compose failed. Is Docker Desktop running?" }
+# docker compose writes progress to stderr which triggers $ErrorActionPreference:Stop even on
+# success. Temporarily suspend the preference for this call and check the real exit code.
+$ErrorActionPreference = "Continue"
+# Datastores only, by name: docker-compose.yml also defines api/web/worker containers for a
+# fully containerised deploy, and a bare `up -d` would start those too -- on the same ports
+# (8000, 5174) the native servers below bind, and with a second worker on the same GPU.
+docker compose -f "$root/docker-compose.yml" up -d postgres redis neo4j 2>&1 | Out-Null
+$dcExit = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($dcExit -ne 0) { throw "docker compose failed (exit $dcExit). Is Docker Desktop running?" }
 
 # compose's own healthchecks are the source of truth; just wait them out
 $deadline = (Get-Date).AddSeconds(120)
 do {
-  $states = docker compose -f "$root/docker-compose.yml" ps --format '{{.Health}}'
+  $states = docker compose -f "$root/docker-compose.yml" ps postgres redis neo4j --format '{{.Health}}'
   if ($states -notcontains "starting" -and $states -notcontains "") { break }
   Start-Sleep 2
 } while ((Get-Date) -lt $deadline)
@@ -122,15 +130,20 @@ if ($gpu) {
 # ---- native servers, one window each -------------------------------------
 $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
 
+$ffbin = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter "ffprobe.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
+if ($ffbin -and $env:PATH -notlike "*$ffbin*") { $env:PATH = "$env:PATH;$ffbin" }
+
 function Start-Window($title, $wd, $cmd) {
   $prelude = "`$Host.UI.RawUI.WindowTitle='$title'; Set-Location '$wd'; " +
              "`$env:MODEL_DIR='$env:MODEL_DIR'; `$env:HF_HOME='$env:HF_HOME'; " +
-             "`$env:PYANNOTE_CACHE='$env:PYANNOTE_CACHE'; `$env:HF_HUB_OFFLINE='1'; " +
-             "`$env:TRANSFORMERS_OFFLINE='1'; `$env:PYTHONPATH='$root'; "
+             "`$env:PYANNOTE_CACHE='$env:PYANNOTE_CACHE'; `$env:HF_HUB_OFFLINE='0'; " +
+             "`$env:TRANSFORMERS_OFFLINE='0'; `$env:PYTHONPATH='$root'; " +
+             "`$env:PATH='$env:PATH'; "
   Start-Process $shell -ArgumentList @("-NoExit", "-Command", ($prelude + $cmd))
 }
 
-Start-Window "api"    $root          "python -m uvicorn api.app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir api --reload-dir common"
+$apiPy = Join-Path $root "api\.venv\Scripts\python.exe"
+Start-Window "api"    $root          "& '$apiPy' -m uvicorn api.app.main:app --host 0.0.0.0 --port 8000"
 Start-Window "worker" "$root\worker" "& '$workerPy' -m arq worker.main.WorkerSettings"
 Start-Window "web"    "$root\web"    "npm run dev"
 

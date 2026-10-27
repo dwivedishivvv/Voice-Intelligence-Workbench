@@ -15,8 +15,8 @@ import re
 import pytest
 
 from common.config import Settings
-from common.graph_sync import (MENTION_CYPHER, NODE_PROJECTIONS, PROJECTIONS,
-                                REL_PROJECTIONS, SPEECH_TEXT_SQL)
+from common.graph_sync import (ENTITY_CYPHER, NODE_PROJECTIONS, PROJECTIONS,
+                                REL_PROJECTIONS, SPEECH_TEXT_SQL, entity_rows)
 
 IDS = [p.name for p in PROJECTIONS]
 
@@ -114,27 +114,49 @@ def _labels_created() -> set[str]:
     for p in NODE_PROJECTIONS:
         created |= set(re.findall(r"MERGE\s*\(\w*:(\w+)", p.cypher))
         created |= set(re.findall(r"SET\s+\w+:(\w+)", p.cypher))
+    # Entity nodes come from the Python extractor rather than a NODE_PROJECTION.
+    created |= set(re.findall(r"MERGE\s*\(\w*:(\w+)", ENTITY_CYPHER["Entity"]))
     return created
 
 
 @pytest.mark.parametrize("cypher,name",
                          [(p.cypher, p.name) for p in REL_PROJECTIONS]
-                         + [(c, f"MENTIONS_{k}") for k, c in MENTION_CYPHER.items()])
+                         + [(c, k) for k, c in ENTITY_CYPHER.items()])
 def test_relationship_endpoints_use_labels_some_node_projection_creates(cypher, name):
     matched = set(re.findall(r"[(,]\s*\w*:(\w+)\s*\{", cypher))
     unknown = matched - _labels_created()
     assert not unknown, f"{name}: MATCHes {sorted(unknown)}, which nothing projects"
 
 
-def test_speech_label_is_applied_to_every_source_the_shared_edges_match():
-    """DURING_LAP and MENTIONS are single projections only because Utterance and RadioCall
-    both carry :Speech. If one stopped setting it, those edges would silently halve."""
+def test_speech_label_is_applied_to_utterances():
+    """Agent and graph-context queries anchor on :Speech {speech_id}; an utterance that
+    stopped carrying both would expand to nothing."""
     setters = {p.name for p in NODE_PROJECTIONS if re.search(r"SET\s+\w+:Speech", p.cypher)}
-    assert setters == {"Utterance", "RadioCall"}
+    assert setters == {"Utterance"}
+    assert "speech_id" in next(p for p in NODE_PROJECTIONS if p.name == "Utterance").cypher
 
-    for p in NODE_PROJECTIONS:
-        if p.name in setters:
-            assert "speech_id" in p.cypher, f"{p.name} sets :Speech but no speech_id to match on"
+
+def test_projection_switches_are_real_boolean_settings():
+    for p in PROJECTIONS:
+        if p.when:
+            assert Settings.model_fields[p.when].annotation is bool, p.name
+
+
+def test_entity_rows_aggregate_mentions_per_clip_speaker_and_pair():
+    speech = [
+        {"speech_id": "u1", "clip_id": "c1", "profile_id": "p1",
+         "text": "We spoke to Reliance about Dunzo yesterday."},
+        {"speech_id": "u2", "clip_id": "c1", "profile_id": None,
+         "text": "Then Reliance invested in Dunzo again."},
+        {"speech_id": "u3", "clip_id": "c2", "profile_id": "p1", "text": "Dunzo shut down."},
+    ]
+    rows = entity_rows(speech, min_mentions=2)
+    assert {e["name"] for e in rows["Entity"]} == {"Reliance", "Dunzo"}
+    assert {"clip_id": "c1", "entity": "Dunzo", "n": 2} in rows["CLIP_MENTIONS"]
+    assert {"profile_id": "p1", "entity": "Dunzo", "n": 2} in rows["SPEAKER_MENTIONED"]
+    assert rows["CO_MENTIONED"] == [{"a": "Dunzo", "b": "Reliance", "n_clips": 1}]
+    names = {e["name"] for e in rows["Entity"]}
+    assert all(r["entity"] in names for r in rows["UTT_MENTIONS"])
 
 
 def test_nodes_are_projected_before_the_relationships_that_match_them():
@@ -153,12 +175,10 @@ def test_projection_names_are_unique():
 @pytest.mark.parametrize("sql,name",
                          [(p.sql, p.name) for p in PROJECTIONS] + [(SPEECH_TEXT_SQL, "SPEECH_TEXT")])
 def test_queries_over_pipeline_output_exclude_unfinished_work(sql, name):
-    """Half-processed clips and un-analyzed radio calls must never reach the graph: their
-    transcripts are absent or partial, and a projection that forgets the filter looks
+    """Half-processed clips must never reach the graph: their transcripts are absent or
+    partial, and a projection that forgets the filter looks
     perfectly healthy while publishing them. Enforced here rather than by factoring the
     predicate into a shared constant, so the SQL stays literal and greppable."""
     flat = " ".join(sql.split())
     if re.search(r"\b(FROM|JOIN)\s+clips\b", flat):
         assert "status = 'COMPLETE'" in flat, f"{name}: reads clips without the status filter"
-    if re.search(r"\b(FROM|JOIN)\s+radio_calls\b", flat):
-        assert "analyzed_at IS NOT NULL" in flat, f"{name}: reads radio_calls unfiltered"

@@ -5,8 +5,9 @@ import { api } from "@/api/client";
 import { AudioPlayer } from "@/components/audio-player";
 import { Dialog } from "@/components/dialog";
 import { EditClipDialog, DeleteClipDialog, type ClipRef } from "@/components/clip-dialogs";
+import { TagChip } from "@/components/tag-chip";
 import {
-  AMBER, AMBER_INK, MOOD_COLOR, MOOD_PCT, OUTCOME, QUALITY_COLOR, RED,
+  AMBER, AMBER_INK, OUTCOME, QUALITY_COLOR, RED,
   fmtTime, muted, num, outcomeOf, voiceColor, type Outcome,
 } from "@/lib/ui";
 
@@ -148,11 +149,34 @@ export default function ClipDetail() {
   const [busy, setBusy] = useState(false);
   const [edit, setEdit] = useState<ClipRef | null>(null);
   const [del, setDel] = useState<ClipRef | null>(null);
+  // Inline transcript correction: which line is open, and its draft text.
+  const [editingLine, setEditingLine] = useState<string | null>(null);
+  const [lineDraft, setLineDraft] = useState("");
+  const [savingLine, setSavingLine] = useState(false);
   // A nonce so clicking the same word twice still re-fires the player's seek effect.
   const [seekTo, setSeekTo] = useState<{ time: number; nonce: number } | null>(null);
   const seek = (time: number) => setSeekTo((p) => ({ time, nonce: (p?.nonce ?? 0) + 1 }));
   const activeRowRef = useRef<HTMLDivElement>(null);
   const seekedRef = useRef(false);
+
+  async function saveLine(utteranceId: string) {
+    if (!id || !lineDraft.trim()) return;
+    setSavingLine(true);
+    try {
+      const r = await api.editUtterance(id, utteranceId, lineDraft);
+      // The word timings belong to the old text, so the corrected line renders as plain
+      // text from here on rather than as words that no longer match it.
+      setResult((cur: any) => cur && {
+        ...cur,
+        utterances: cur.utterances.map((x: any) =>
+          x.id === utteranceId ? { ...x, text: r.text, edited: true } : x),
+      });
+      setEditingLine(null);
+      toast.success("Line corrected");
+    } catch (e) {
+      toast.error("Could not save the line", { description: String(e) });
+    } finally { setSavingLine(false); }
+  }
 
   async function load() {
     if (id) setResult(await api.getResult(id));
@@ -220,22 +244,6 @@ export default function ClipDetail() {
     };
   }, [speakers]);
 
-  const tone = useMemo(() => {
-    const utts: any[] = result?.utterances || [];
-    const scored = utts.filter((u) => u.sentiment_score != null);
-    const disagree = utts.filter((u) => u.text_sentiment && u.sentiment && u.text_sentiment !== u.sentiment);
-    const moods = utts.filter((u) => u.mood);
-    const counts: Record<string, number> = {};
-    for (const u of moods) counts[u.mood] = (counts[u.mood] || 0) + 1;
-    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-    return {
-      avg: scored.length ? scored.reduce((n, u) => n + u.sentiment_score, 0) / scored.length : null,
-      disagreements: disagree.length,
-      mood: top ? top[0] : null,
-      moodShare: top && moods.length ? top[1] / moods.length : null,
-    };
-  }, [result]);
-
   if (!result) {
     return <p style={{ color: muted(55) }}>Loading the clip…</p>;
   }
@@ -298,6 +306,17 @@ export default function ClipDetail() {
     toast.error("Pick a voice, type a name, or record an abstention");
   }
 
+  async function retag() {
+    try {
+      await api.retagClip(clip.id);
+      toast.success("Re-tagging queued", { description: "Tags refresh when the worker gets to it." });
+      // the job is a single cheap pass; one delayed reload is enough to pick it up
+      setTimeout(() => load().catch(() => {}), 4000);
+    } catch (e) {
+      toast.error("Could not re-tag", { description: String(e) });
+    }
+  }
+
   const clipRef: ClipRef = {
     id: clip.id, filename: clip.filename, duration_s: clip.duration_s,
     n_speakers: clip.n_speakers, created_at: clip.created_at,
@@ -327,6 +346,19 @@ export default function ClipDetail() {
                 </span>
               )}
             </div>
+            {((clip.tags || []).length > 0 || clip.auto_tags != null) && (
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
+                {(clip.tags || []).map((t: string) => <TagChip key={`m-${t}`} tag={t} auto={false} />)}
+                {(clip.auto_tags || []).map((t: string) => <TagChip key={`a-${t}`} tag={t} auto />)}
+                {clip.status === "COMPLETE" && (
+                  <button className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 7px" }}
+                          title="Re-derive the pipeline's tags from this clip's stored analysis"
+                          onClick={retag}>
+                    re-tag
+                  </button>
+                )}
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span className="tag tag-accent" style={{ border: "1px solid var(--color-accent-300)" }}>
@@ -464,25 +496,38 @@ export default function ClipDetail() {
                       {outcome}{u.mean_speaker_conf != null && !abstained ? ` ${num(u.mean_speaker_conf)}` : ""}
                       {active ? " · playing" : ""}
                     </span>
-                    {u.mood && (
-                      <span className="mono" style={{
-                        display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: muted(55),
-                      }}>
-                        <span style={{
-                          width: 26, height: 5, background: muted(12),
-                          display: "inline-block", position: "relative",
-                        }}>
-                          <span style={{
-                            position: "absolute", left: 0, top: 0, bottom: 0,
-                            width: MOOD_PCT[u.mood] || "30%", background: MOOD_COLOR[u.mood] || muted(40),
-                          }} />
-                        </span>
-                        {u.mood}
-                      </span>
+                    {editingLine !== u.id && (
+                      <button className="btn btn-ghost" title="Correct this line"
+                              style={{ fontSize: 11, padding: "1px 6px", marginLeft: "auto", color: muted(55) }}
+                              onClick={(e) => { e.stopPropagation(); setEditingLine(u.id); setLineDraft(u.text); }}>
+                        Edit
+                      </button>
                     )}
                   </div>
+                  {editingLine === u.id ? (
+                    <div onClick={(e) => e.stopPropagation()}
+                         style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <textarea className="input" rows={3} autoFocus value={lineDraft}
+                                style={{ resize: "vertical", fontSize: 14.5, lineHeight: 1.5 }}
+                                onChange={(e) => setLineDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Escape") setEditingLine(null);
+                                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) saveLine(u.id);
+                                }} />
+                      <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <button className="btn btn-primary" style={{ fontSize: 12, padding: "4px 10px" }}
+                                disabled={savingLine || !lineDraft.trim() || lineDraft.trim() === u.text}
+                                onClick={() => saveLine(u.id)}>{savingLine ? "Saving…" : "Save line"}</button>
+                        <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 8px" }}
+                                onClick={() => setEditingLine(null)}>Cancel</button>
+                        <span className="mono" style={{ fontSize: 11, color: muted(48) }}>
+                          Ctrl+Enter saves · search and the graph pick up the correction
+                        </span>
+                      </span>
+                    </div>
+                  ) : (
                   <p style={{ margin: 0, fontSize: 15, lineHeight: 1.6, textWrap: "pretty" } as React.CSSProperties}>
-                    {words ? words.map((w: any, i: number) => {
+                    {words && !u.edited ? words.map((w: any, i: number) => {
                       const spoken = currentTime >= w.end_s;
                       const now = currentTime >= w.start_s && currentTime < w.end_s;
                       const shaky = w.probability != null && w.probability < 0.5;
@@ -506,6 +551,7 @@ export default function ClipDetail() {
                       );
                     }) : u.text}
                   </p>
+                  )}
                   {abstained && (
                     <span style={{ fontSize: 12, color: muted(55) }}>
                       The system declined to judge this voice.{" "}
@@ -549,28 +595,20 @@ export default function ClipDetail() {
             </div>
           )}
 
-          <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 8 }}>
-            <span className="kicker-sm" style={{ color: muted(55) }}>Sentiment vs tone</span>
-            <div style={{ fontSize: 13, color: muted(75) }}>
-              {tone.disagreements > 0
-                ? `Two readings disagree on ${tone.disagreements} utterance${tone.disagreements === 1 ? "" : "s"}. They are kept apart, not averaged.`
-                : "The two readings agree across this clip. They are still stored apart."}
+          {clip.notes && (
+            <div className="blueprint" style={{ padding: 13, display: "flex", flexDirection: "column", gap: 6 }}>
+              <span className="kicker-sm" style={{ color: muted(55) }}>Note</span>
+              <p style={{ margin: 0, fontSize: 13, whiteSpace: "pre-wrap", color: muted(80) }}>{clip.notes}</p>
             </div>
-            <div className="mono" style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
-              <span style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>text</span>
-                <span>{tone.avg == null ? "—" : `${tone.avg > 0 ? "+" : ""}${tone.avg.toFixed(2)}`}</span>
-              </span>
-              <span style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>voice</span>
-                <span>{tone.mood ? `${tone.mood} ${num(tone.moodShare)}` : "—"}</span>
-              </span>
-            </div>
-          </div>
+          )}
 
-          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.5, color: muted(50) }}>
-            Tone labels are heuristic readings of the audio, not measurements of how anyone felt.
-          </p>
+          <a href={`/graph?focus=${clip.id}`}
+             onClick={(e) => { e.preventDefault(); navigate(`/graph?focus=${clip.id}`); }}
+             className="blueprint row-hover"
+             style={{ padding: 13, display: "flex", flexDirection: "column", gap: 4, color: "inherit", textDecoration: "none" }}>
+            <span className="kicker-sm" style={{ color: muted(55) }}>Knowledge graph</span>
+            <span style={{ fontSize: 13 }}>See who and what this recording connects to →</span>
+          </a>
         </aside>
       </section>
 

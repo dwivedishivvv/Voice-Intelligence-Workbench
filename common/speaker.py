@@ -118,6 +118,62 @@ async def identify(emb: np.ndarray, reliability: float, cfg) -> Match:
                  second["sim"] if second else None, z)
 
 
+async def embedding_dim() -> int | None:
+    """Width of the stored voiceprint columns — pgvector keeps the dimension as the type
+    modifier. Callers validating a vector from outside (live tagging) check against this
+    rather than a hardcoded number that changes with the embedding model."""
+    return await db.fetchval(
+        """SELECT atttypmod FROM pg_attribute
+           WHERE attrelid = 'clip_speakers'::regclass AND attname = 'embedding'""")
+
+
+async def reidentify(cfg, clip_ids: list[str] | None = None) -> dict:
+    """Re-run identification over stored voices, so naming a voice once names it everywhere.
+
+    identify() used to run exactly once per voice, when its clip was processed. A voice
+    heard in fifty clips before anyone named it stayed "unknown" in all fifty even after
+    someone named it in the fifty-first — cross-recording identity only ever worked
+    forwards. This applies the same identify() to what is already stored, after anything
+    that changes what a match could be (an enrolment, a promotion, a merge, a deletion, a
+    re-embedding).
+
+    The same rules as the identify stage, and the same abstentions: nothing a person set by
+    hand (is_manual) is touched, a weaker match never overwrites a stronger one's evidence
+    differently than a fresh run would, and an embedding too unreliable to judge stays
+    unjudged. Returns what changed, for the audit log.
+    """
+    rows = await db.fetch(
+        f"""SELECT clip_id, local_label, embedding, reliability, profile_id, match_result,
+                   cluster_id
+            FROM clip_speakers
+            WHERE NOT is_manual AND embedding IS NOT NULL
+            {"AND clip_id = ANY($1::uuid[])" if clip_ids is not None else ""}""",
+        *([clip_ids] if clip_ids is not None else []))
+    changed = []
+    for r in rows:
+        m = await identify(np.asarray(r["embedding"], dtype=np.float32),
+                           float(r["reliability"] or 0.0), cfg)
+        new_pid = str(m.profile_id) if m.profile_id else None
+        old_pid = str(r["profile_id"]) if r["profile_id"] else None
+        # a voice a profile now claims with confidence no longer belongs in the unnamed pool
+        new_cluster = None if m.result == "confident" else r["cluster_id"]
+        await db.execute(
+            """UPDATE clip_speakers SET profile_id=$3, match_score=$4, match_margin=$5,
+                   match_result=$6, match_z=$7, runner_up_id=$8, runner_up_score=$9,
+                   cluster_id=$10
+               WHERE clip_id=$1 AND local_label=$2""",
+            r["clip_id"], r["local_label"], new_pid, m.score, m.margin, m.result, m.z,
+            m.runner_up_id, m.runner_up_score, new_cluster)
+        if new_pid != old_pid or m.result != r["match_result"]:
+            await db.execute(
+                "UPDATE utterances SET profile_id=$3 WHERE clip_id=$1 AND local_label=$2",
+                r["clip_id"], r["local_label"], new_pid)
+            changed.append({"clip_id": str(r["clip_id"]), "local_label": r["local_label"],
+                            "from": old_pid, "to": new_pid,
+                            "was": r["match_result"], "now": m.result})
+    return {"checked": len(rows), "changed": changed}
+
+
 async def add_enrollment(profile_id: str, sp, clip_id: str, source: str, actor=None) -> str:
     # called with either a SpeakerResult dataclass (attribute access only) from the worker
     # or an asyncpg.Record (dict-like __getitem__, but NOT a dict instance and no attribute
@@ -305,18 +361,34 @@ async def merge_profiles(src_id: str, dst_id: str):
     await db.execute("UPDATE speaker_enrollments SET profile_id=$2 WHERE profile_id=$1", src_id, dst_id)
     await db.execute("UPDATE clip_speakers SET profile_id=$2 WHERE profile_id=$1", src_id, dst_id)
     await db.execute("UPDATE utterances SET profile_id=$2 WHERE profile_id=$1", src_id, dst_id)
+    # A cluster promoted into the source profile has no ON DELETE action on promoted_to, so
+    # without this the delete below fails on any profile that started life as a cluster.
+    await db.execute("UPDATE speaker_clusters SET promoted_to=$2 WHERE promoted_to=$1", src_id, dst_id)
     await db.execute("DELETE FROM speaker_profiles WHERE id=$1", src_id)
     await recompute_centroid(dst_id)
 
 
-async def promote_cluster(cluster_id: str, name: str, cfg) -> str:
-    pid = await db.insert("speaker_profiles", {"display_name": name, "status": "provisional"})
+async def promote_cluster(cluster_id: str, name: str | None, cfg,
+                          profile_id: str | None = None) -> str:
+    """Name a cluster: into `profile_id` when given, else into the profile already called
+    `name`, else into a new one. Naming a voice after someone who is already enrolled is
+    a merge, not a second profile -- and the unique name index would refuse the second."""
+    pid = profile_id
+    if pid is None:
+        pid = await db.fetchval(
+            "SELECT id FROM speaker_profiles WHERE lower(display_name)=lower($1)", name)
+    if pid is None:
+        pid = await db.insert("speaker_profiles", {"display_name": name, "status": "provisional"})
+    pid = str(pid)
     members = await db.fetch("SELECT * FROM clip_speakers WHERE cluster_id=$1", cluster_id)
     for m in members:
         if (m["reliability"] or 0) >= cfg.reliability_fair and m["embedding"] is not None:
+            # local_label too: without it an enrolment cannot be traced back to the voice it
+            # came from, and worker/reembed.py could not rebuild it under a new model
             await db.insert("speaker_enrollments", {
-                "profile_id": pid, "clip_id": m["clip_id"], "embedding": m["embedding"],
-                "duration_s": m["speech_s"], "reliability": m["reliability"], "source": "promoted"})
+                "profile_id": pid, "clip_id": m["clip_id"], "local_label": m["local_label"],
+                "embedding": m["embedding"], "duration_s": m["speech_s"],
+                "reliability": m["reliability"], "source": "promoted"})
     # Order matters: the utterances UPDATE finds its rows *through* clip_speakers.cluster_id,
     # so it has to run while that column still holds the cluster. Clearing clip_speakers
     # first (as this did) left the second statement matching zero rows every time, so a

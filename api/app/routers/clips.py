@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from common.config import get_settings, get_effective_settings
 from common import db, storage, audit as audit_mod, graph_sync
 from ..auth import get_current_user
-from ..services import queue, ingest
+from ..services import queue, ingest, speaker_ops
 
 router = APIRouter(prefix="/v1/clips", tags=["clips"])
 
@@ -24,8 +24,8 @@ async def upload_clip(file: UploadFile = File(...), tags: str = "", notes: str =
 
 @router.get("")
 async def list_clips(q: str | None = None, status: str | None = None,
-                      needs_review: bool | None = None, limit: int = 25, offset: int = 0,
-                      user=Depends(get_current_user)):
+                      needs_review: bool | None = None, tag: list[str] = Query(default=[]),
+                      limit: int = 25, offset: int = 0, user=Depends(get_current_user)):
     conds, params = [], []
     if status:
         params.append(status); conds.append(f"status=${len(params)}")
@@ -33,15 +33,45 @@ async def list_clips(q: str | None = None, status: str | None = None,
         params.append(needs_review); conds.append(f"needs_review=${len(params)}")
     if q:
         params.append(f"%{q}%"); conds.append(f"filename ILIKE ${len(params)}")
+    # Every tag given must be present, from either column: the operator's or the
+    # pipeline's. ?tag=voices:dialogue&tag=lang:en narrows, it does not widen.
+    for t in tag:
+        params.append(t); conds.append(f"(${len(params)} = ANY(tags) OR ${len(params)} = ANY(auto_tags))")
     where = f"WHERE {' AND '.join(conds)}" if conds else ""
     params += [limit, offset]
     rows = await db.fetch(
         f"""SELECT id, filename, duration_s, status, language, n_speakers, needs_review,
-                   created_at, error_code
+                   created_at, error_code, tags, auto_tags, notes
             FROM clips {where} ORDER BY created_at DESC LIMIT ${len(params)-1} OFFSET ${len(params)}""",
         *params)
     total = await db.fetchval(f"SELECT count(*) FROM clips {where}", *params[:-2])
     return {"items": [dict(r) for r in rows], "total": total}
+
+
+@router.get("/tags")
+async def tag_counts(user=Depends(get_current_user)):
+    """Every tag in use with how many clips carry it, manual and automatic apart — the
+    Library's filter menu. Declared before /{clip_id} so "tags" is not read as an id."""
+    rows = await db.fetch(
+        """SELECT tag, source, count(*)::int AS n FROM (
+             SELECT unnest(tags) AS tag, 'manual' AS source FROM clips
+             UNION ALL
+             SELECT unnest(auto_tags), 'auto' FROM clips WHERE auto_tags IS NOT NULL
+           ) t
+           WHERE tag <> ''
+           GROUP BY tag, source ORDER BY n DESC, tag""")
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.post("/{clip_id}/retag")
+async def retag_clip(clip_id: str, user=Depends(get_current_user)):
+    row = await db.fetchrow("SELECT status FROM clips WHERE id=$1", clip_id)
+    if not row:
+        raise HTTPException(404, "clip not found")
+    if row["status"] != "COMPLETE":
+        raise HTTPException(409, "only a COMPLETE clip has the analysis tags are read from")
+    job_id = await queue.enqueue_retag([clip_id])
+    return {"job_id": job_id}
 
 
 @router.get("/{clip_id}")
@@ -136,6 +166,7 @@ async def reprocess_clip(clip_id: str, user=Depends(get_current_user)):
 
 
 class PatchClip(BaseModel):
+    filename: str | None = None
     tags: list[str] | None = None
     notes: str | None = None
     needs_review: bool | None = None
@@ -143,6 +174,13 @@ class PatchClip(BaseModel):
 
 @router.patch("/{clip_id}")
 async def patch_clip(clip_id: str, body: PatchClip, user=Depends(get_current_user)):
+    if body.filename is not None:
+        body.filename = body.filename.strip()
+        if not body.filename:
+            raise HTTPException(400, "filename cannot be empty")
+    if body.tags is not None:
+        # trimmed and de-duplicated, order kept: "call, call , " is one tag, not three
+        body.tags = list(dict.fromkeys(t.strip() for t in body.tags if t.strip()))
     sets, params = [], []
     for field, val in body.model_dump(exclude_none=True).items():
         params.append(val)
@@ -151,22 +189,113 @@ async def patch_clip(clip_id: str, body: PatchClip, user=Depends(get_current_use
         return {"ok": True}
     params.append(clip_id)
     await db.execute(f"UPDATE clips SET {', '.join(sets)}, updated_at=now() WHERE id=${len(params)}", *params)
-    await audit_mod.audit("clip.tag", "clip", clip_id, after=body.model_dump(exclude_none=True), actor=user)
+    await audit_mod.audit("clip.edit", "clip", clip_id, after=body.model_dump(exclude_none=True), actor=user)
+    # The name and tags are graph properties and Tag edges.
+    if body.filename is not None or body.tags is not None:
+        await graph_sync.resync(queue.redis())
     return {"ok": True}
 
 
-@router.delete("/{clip_id}")
-async def delete_clip(clip_id: str, user=Depends(get_current_user)):
+async def _delete_one(clip_id: str, user: str) -> bool:
     cfg = get_settings()
     row = await db.fetchrow("SELECT sha256 FROM clips WHERE id=$1", clip_id)
     if not row:
-        raise HTTPException(404, "clip not found")
+        return False
     storage.delete_clip_files(cfg, clip_id)
     await db.execute("DELETE FROM clips WHERE id=$1", clip_id)
     await db.insert("deletion_receipts", {"object_type": "clip", "object_id": clip_id,
                                            "sha256": row["sha256"], "reason": "user_requested"})
     await audit_mod.audit("clip.delete", "clip", clip_id, actor=user)
-    await graph_sync.resync()
+    return True
+
+
+class BulkBody(BaseModel):
+    ids: list[str]
+    # delete | reprocess | add_tag | remove_tag | mark_reviewed | flag_review
+    action: str
+    tag: str | None = None
+
+
+BULK_ACTIONS = {"delete", "reprocess", "add_tag", "remove_tag", "mark_reviewed", "flag_review"}
+
+
+@router.post("/bulk")
+async def bulk(body: BulkBody, user=Depends(get_current_user)):
+    """One action over many clips — the Library's selection bar. Each clip goes through
+    the same path its single-clip endpoint uses, so audit and cleanup are identical."""
+    if body.action not in BULK_ACTIONS:
+        raise HTTPException(400, f"action must be one of {', '.join(sorted(BULK_ACTIONS))}")
+    tag = (body.tag or "").strip()
+    if body.action in ("add_tag", "remove_tag") and not tag:
+        raise HTTPException(400, "tag is required")
+    ids = list(dict.fromkeys(body.ids))[:500]
+    done = 0
+    for clip_id in ids:
+        if body.action == "delete":
+            done += await _delete_one(clip_id, user)
+        elif body.action == "reprocess":
+            if await db.fetchval("SELECT 1 FROM clips WHERE id=$1", clip_id):
+                await db.execute("UPDATE clips SET status='QUEUED', error_code=NULL, "
+                                 "error_detail=NULL WHERE id=$1", clip_id)
+                await queue.enqueue_clip(clip_id)
+                done += 1
+        elif body.action == "add_tag":
+            done += int((await db.execute(
+                "UPDATE clips SET tags = array_append(tags, $2), updated_at=now() "
+                "WHERE id=$1 AND NOT ($2 = ANY(tags))", clip_id, tag)).split()[-1])
+        elif body.action == "remove_tag":
+            done += int((await db.execute(
+                "UPDATE clips SET tags = array_remove(tags, $2), updated_at=now() "
+                "WHERE id=$1 AND $2 = ANY(tags)", clip_id, tag)).split()[-1])
+        else:
+            done += int((await db.execute(
+                "UPDATE clips SET needs_review=$2, updated_at=now() WHERE id=$1",
+                clip_id, body.action == "flag_review")).split()[-1])
+    await audit_mod.audit(f"clip.bulk.{body.action}", "clip", ",".join(ids)[:200],
+                          after={"n": done, "tag": tag or None}, actor=user)
+    if body.action != "reprocess":
+        await graph_sync.resync(queue.redis())
+    return {"ok": True, "n": done}
+
+
+class PatchUtterance(BaseModel):
+    text: str
+
+
+@router.patch("/{clip_id}/utterances/{utterance_id}")
+async def patch_utterance(clip_id: str, utterance_id: str, body: PatchUtterance,
+                          user=Depends(get_current_user)):
+    """Correct one line of a transcript. The full-text index follows by trigger; the
+    vector is re-encoded here so semantic search finds the corrected words, not the
+    misheard ones."""
+    text = " ".join(body.text.split())
+    if not text:
+        raise HTTPException(400, "text cannot be empty")
+    before = await db.fetchval(
+        "SELECT text FROM utterances WHERE id=$1 AND clip_id=$2", utterance_id, clip_id)
+    if before is None:
+        raise HTTPException(404, "utterance not found on this clip")
+    try:
+        from .. import text_embed
+        vec = list(map(float, text_embed.encode(text)))
+    except Exception:
+        vec = None  # no encoder on this box: keep the old vector rather than fail the edit
+    if vec is not None:
+        await db.execute("UPDATE utterances SET text=$2, embedding=$3::vector WHERE id=$1",
+                         utterance_id, text, vec)
+    else:
+        await db.execute("UPDATE utterances SET text=$2 WHERE id=$1", utterance_id, text)
+    await audit_mod.audit("utterance.edit", "utterance", utterance_id,
+                          before={"text": before}, after={"text": text}, actor=user)
+    await graph_sync.resync(queue.redis())
+    return {"ok": True, "text": text}
+
+
+@router.delete("/{clip_id}")
+async def delete_clip(clip_id: str, user=Depends(get_current_user)):
+    if not await _delete_one(clip_id, user):
+        raise HTTPException(404, "clip not found")
+    await graph_sync.resync(queue.redis())
     return {"ok": True}
 
 
@@ -179,14 +308,9 @@ class AssignBody(BaseModel):
 
 @router.post("/{clip_id}/speakers/{local_label}/assign")
 async def assign_speaker(clip_id: str, local_label: str, body: AssignBody, user=Depends(get_current_user)):
-    from common import speaker as sc  # shared with worker — same enrollment/centroid logic
-
-    cs = await db.fetchrow("SELECT * FROM clip_speakers WHERE clip_id=$1 AND local_label=$2",
-                            clip_id, local_label)
-    if not cs:
+    if not await db.fetchval("SELECT 1 FROM clip_speakers WHERE clip_id=$1 AND local_label=$2",
+                             clip_id, local_label):
         raise HTTPException(404, "speaker not found on this clip")
-    before = {"profile_id": str(cs["profile_id"]) if cs["profile_id"] else None,
-              "match_result": cs["match_result"], "score": cs["match_score"]}
 
     profile_id = body.profile_id
     if body.create_profile:
@@ -202,24 +326,11 @@ async def assign_speaker(clip_id: str, local_label: str, body: AssignBody, user=
     if body.mark_unknown:
         profile_id = None
 
-    await db.execute(
-        """UPDATE clip_speakers SET profile_id=$1, is_manual=true, match_result='confident'
-           WHERE clip_id=$2 AND local_label=$3""", profile_id, clip_id, local_label)
-    await db.execute(
-        """UPDATE utterances SET profile_id=$1 WHERE clip_id=$2 AND local_label=$3""",
-        profile_id, clip_id, local_label)
-
-    enrolled, skip_reason = False, None
-    if body.enroll and profile_id:
-        if cs["embedding"] is None:
-            skip_reason = "not enough clean (non-overlapping) speech from this speaker to build a voiceprint"
-        elif (cs["reliability"] or 0) < (await get_effective_settings()).reliability_fair:
-            skip_reason = f"voiceprint reliability too low ({cs['reliability'] or 0:.2f})"
-        else:
-            await sc.add_enrollment(profile_id, cs, clip_id, source="manual", actor=user)
-            enrolled = True
-
-    await audit_mod.audit("identification.correct", "clip_speaker", f"{clip_id}:{local_label}",
-                           before=before, after={"profile_id": str(profile_id) if profile_id else None}, actor=user)
-    return {"ok": True, "profile_id": profile_id, "enrolled": enrolled,
-            "enroll_skip_reason": skip_reason, "was": before}
+    result = await speaker_ops.assign(clip_id, local_label, profile_id, enroll=bool(body.enroll),
+                                      cfg=await get_effective_settings(), actor=user)
+    # A new enrolment can match this voice in any other clip, so identification re-runs
+    # over the corpus; that pass also schedules the graph rebuild for whatever it changes.
+    # The graph is scheduled here too for the correction itself (SPOKEN_BY edges).
+    await queue.enqueue_reidentify()
+    await graph_sync.resync(queue.redis())
+    return result

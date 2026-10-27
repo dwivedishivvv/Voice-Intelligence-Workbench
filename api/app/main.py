@@ -6,13 +6,13 @@ from fastapi.responses import PlainTextResponse
 from prometheus_client import generate_latest
 
 from common.config import get_settings
-from common import db, graph, events
+from common import db, graph, events, schema
 from .observability import configure_logging
 from .services import queue
 # `graph` is aliased: common.graph (the driver, closed in the lifespan below) and
 # routers.graph would otherwise collide, and the router import wins silently.
-from .routers import (clips, speakers, clusters, search, admin, models, ws, live, f1,
-                       races, agent, graph as graph_router)
+from .routers import (clips, speakers, clusters, search, admin, models, ws, live,
+                       agent, graph as graph_router)
 
 
 @asynccontextmanager
@@ -20,6 +20,9 @@ async def lifespan(app: FastAPI):
     cfg = get_settings()
     configure_logging(cfg.log_level)
     await db.init_pool(cfg)
+    # Existing volumes never re-run init.sql; replaying the idempotent files here is what
+    # gets them new columns (auto_tags, ...) without a manual psql step.
+    await schema.apply_replayable()
     await queue.init_queue(cfg.redis_url)
     # Same pub/sub channel the worker publishes stage progress on; the agent
     # is just another producer (see common/events.py).
@@ -36,7 +39,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Speaker Intelligence Workbench", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-for r in (clips.router, speakers.router, clusters.router, search.router, admin.router, models.router, live.router, f1.router, races.router, agent.router, graph_router.router):
+for r in (clips.router, speakers.router, clusters.router, search.router, admin.router, models.router, live.router, agent.router, graph_router.router):
     app.include_router(r)
 app.include_router(ws.router)
 

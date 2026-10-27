@@ -131,10 +131,9 @@ render "we don't know when this happened" as an ordinary state.
   comes back misspelled a dozen different ways across a corpus — and there is no fuzzy-name
   matching to recover from that. Searching for a name finds only the spellings the model
   happened to produce.
-- **No filters in the search API beyond speaker** — no date range, no status, no tag.
-- **Search has no UI at all.** The endpoint exists and works in all three modes; nothing in
-  the interface calls it. Library filters by *filename* only. This is the single largest
-  gap between what the backend can do and what a user can reach.
+- **Filters are speaker, tone and tag** — no date range or status filter yet.
+- **Search UI lives in the Library.** All three modes, composable with the tag filter;
+  each hit deep-links to its moment in the clip. Filename filtering is still separate.
 
 ---
 
@@ -163,9 +162,10 @@ not mean absence of a mention.
 
 - **It is a derived read model.** Postgres is the source of truth; the graph is projected
   from it and can be wiped and rebuilt at any time.
-- **It can be stale.** Projection runs on demand — manually or from an admin action — not
-  on every pipeline completion. Anything processed since the last projection is missing
-  from graph-backed views until someone re-syncs.
+- **It lags by seconds.** Clip completions and identity edits schedule a rebuild that is
+  coalesced over `graph_sync_debounce_s` (20s by default), so a batch upload rebuilds once
+  rather than once per clip. Anything processed inside the current window is missing from
+  graph-backed views until that window's rebuild runs.
 - **Full rebuild only.** There is no incremental sync. Fine at current scale, seconds to
   run; it is a rebuild-everything operation regardless.
 - **Optional.** Disabled by default. With it off, graph-backed views degrade rather than
@@ -221,10 +221,11 @@ corrupted the process. Parallelism means more worker **processes**, not more thr
 - **Single shared API key.** No user accounts, no roles, no multi-tenancy, no per-user
   data separation. Everyone with the key sees everything.
 - **No schema migrations.** The database initialises once on a fresh volume; incremental
-  schema files are written to be safely re-runnable against a live database. There is no
-  versioned upgrade path.
-- **Retention is configured but not enforced.** The setting exists and is surfaced; the
-  process that would act on it does not exist. The current behaviour is keep-forever.
+  schema files are written to be safely re-runnable and the api and worker replay them at
+  startup (`common/schema.py`). There is no versioned upgrade path.
+- **Retention is enforced by the worker's maintenance pass** every five minutes when
+  `retention_days` > 0 (default 0, keep forever). Each deletion leaves a receipt and the
+  pass is audited, same as a manual delete.
 - **No GPU out-of-memory recovery** beyond ordinary job retry.
 - **GPU strongly assumed.** It runs on CPU, roughly twenty times slower.
 - **Desktop-only layout.** Fixed sidebar, single content column, no responsive or mobile
@@ -263,9 +264,7 @@ Listed so a design does not assume them:
 - SSO, RBAC, multi-tenancy
 - Cursor pagination
 - Trained speech-emotion recognition
-- Automatic retention enforcement
 - Incremental graph sync
-- Any search UI
 - Mobile or responsive layouts
 - A guided first-run experience
 

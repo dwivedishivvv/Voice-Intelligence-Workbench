@@ -129,7 +129,8 @@ tr, pl, sv, fi, da, no`. A typo here silently pins ASR to a wrong language — t
 
 | Key | Type | Default | Valid range | Entry format | What it does |
 |---|---|---|---|---|---|
-| `graph_lap_match_tolerance_s` | float | 2.0 | 0.0–30 | number, step 0.5, suffix "s" | Slack when matching speech to the lap it happened on. Speech inside the overlap links to **both** laps rather than being assigned by coin flip. Applies to the next *graph sync*, not the next job — the tab should say so |
+| `graph_entity_min_mentions` | int | 2 | 1–100 | number, step 1 | How many times the transcripts must name something before it becomes an `:Entity` node. One stray capitalised word is more often ASR noise than a subject. Applies to the next *graph sync* |
+| `graph_utterance_nodes` | bool | true | — | toggle | Project every utterance as a node. Off keeps the graph to people, recordings, topics and entities on a corpus too large to draw line by line; the agent's `expand_speech` then falls back to Postgres |
 
 ---
 
@@ -157,7 +158,6 @@ worker startup.
 | `diar_model` | str | `pyannote-3.1` | Registry key |
 | `embed_model` | str | `ecapa` | Registry key |
 | `text_embed_model` | str | `minilm` | Registry key |
-| `sentiment_model` | str | `xlmr-sentiment` | Registry key — **missing from `RESTART_REQUIRED_FIELDS`**, so it's the one model the System tab doesn't list |
 
 Model *downloads* and activation are handled by the Models tab (`ModelsPanel`), not these
 fields.
@@ -230,8 +230,6 @@ Not fields in `Settings` — new work, listed so the scope is visible:
    on the numeric fields fixes this at both API and (via the schema) the UI.
 4. **`asr_language` is free text.** Same class of typo bug that `device` was made a `Literal` to
    prevent, and it fails silently rather than loudly.
-5. **`sentiment_model` is missing from `RESTART_REQUIRED_FIELDS`**, so the System tab lists eight
-   of the nine baked-in model fields.
-6. **The float input step is a flat `0.01`.** Fine for thresholds, wrong for `target_lufs`
+5. **The float input step is a flat `0.01`.** Fine for thresholds, wrong for `target_lufs`
    (0.5), `merge_gap_s` (0.1) and `quality_min_bandwidth_hz` (100). Per-field `step` would come
    free if the API returned it alongside `type`.

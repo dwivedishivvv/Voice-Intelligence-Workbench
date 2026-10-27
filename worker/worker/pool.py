@@ -1,5 +1,5 @@
 """Model pool with lazy, priority-based GPU loading. Every model loads on first use and
-stays cached across jobs (jobs are serialized through gpu_sem/live_sem — see main.py — so
+stays cached across jobs (jobs are serialized through the model lanes — see lane.py — so
 there's never more than one job's worth of models needed at once). If loading or warming a
 model hits a CUDA OOM, the lowest-priority already-cached model is evicted and the load is
 retried, so five models that together don't fit in VRAM still work: cheap ones just get
@@ -10,15 +10,22 @@ from pathlib import Path
 import numpy as np
 import structlog
 import torch
+import transformers  # pre-initialize before parallel model loads — avoids a race where
+                     # concurrent threads each trigger transformers.__init__ and one sees
+                     # a partial module missing is_torch_npu_available (sentence-transformers)
+import pyannote.audio  # same race, two importers: diarization and the WeSpeaker embedder
+                       # (speaker_models.py) both load from pyannote.audio in parallel threads,
+                       # and the loser hit "cannot import name 'Model' from partially
+                       # initialized module pyannote.audio.core.model"
 
 from .ctx import SR
 
 log = structlog.get_logger()
 
-# Eviction order when a load hits CUDA OOM: first entry goes first. sentiment/text_embedder
-# are the smallest wins and least central to the pipeline (sentiment is even optional);
-# asr is needed by every job type (live chunks included) so it's evicted only as a last resort.
-_PRIORITY = ["sentiment", "text_embedder", "embedder", "diar", "asr"]
+# Eviction order when a load hits CUDA OOM: first entry goes first. text_embedder is the
+# smallest win and least central to the pipeline; asr is needed by every job type (live
+# chunks included) so it's evicted only as a last resort.
+_PRIORITY = ["text_embedder", "embedder", "diar", "asr"]
 
 
 def resolve_device(cfg) -> str:
@@ -56,12 +63,56 @@ class ModelPool:
         self.versions = verify_models(cfg.model_dir)
         self._cache = {}
         self.vad = None
+        # Whisper's own lane (lane.py): every caller of self.asr holds it, so the model is
+        # never entered twice at once while live chunks still skip the rest of the queue.
+        from .lane import ModelLane
+        self.asr_lane = ModelLane()
 
     async def load(self):
+        import asyncio
         t0 = time.perf_counter()
-        from silero_vad import load_silero_vad  # weights bundled in the wheel — no download
-        self.vad = load_silero_vad()
-        self._get("asr")  # every job type (live chunks included) needs this one
+
+        def _do_vad():
+            from silero_vad import load_silero_vad
+            return load_silero_vad()
+
+        def _do_model(name):
+            t1 = time.perf_counter()
+            loader = getattr(self, f"_load_{name}")
+            while True:
+                try:
+                    obj = loader()
+                    log.info("model_loaded", name=name, ms=int((time.perf_counter() - t1) * 1000))
+                    return name, obj
+                except RuntimeError as e:
+                    if self.device != "cuda" or not _is_oom(e):
+                        raise
+                    evicted = self._evict_lowest_priority(exclude=name)
+                    if evicted is None:
+                        raise
+                    log.warning("model_evicted_for_vram", evicted=evicted, loading=name)
+
+        # Phase 1 — parallel: each model reads different weight files from disk; CUDA
+        # allocations serialize internally inside the driver so concurrent loads are safe.
+        names = ("asr", "diar", "embedder", "text_embedder")
+        results = await asyncio.gather(
+            asyncio.to_thread(_do_vad),
+            *[asyncio.to_thread(_do_model, n) for n in names],
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+        self.vad = results[0]
+        for name, obj in results[1:]:
+            self._cache[name] = obj
+
+        # Phase 2 — sequential: CUDA inference warm-up (single-threaded is safer on one GPU)
+        for name in ("asr", "diar", "embedder", "text_embedder"):
+            obj = self._cache.get(name)
+            if obj is not None:
+                self._warm(name, obj)
+
         return int((time.perf_counter() - t0) * 1000)
 
     def _get(self, name):
@@ -103,7 +154,6 @@ class ModelPool:
             obj.encode_batch(torch.from_numpy(dummy).unsqueeze(0))
         elif name == "text_embedder":
             obj.encode(["warmup"])
-        # sentiment: a small classifier — first real call's cold-start isn't worth warming
 
     def _load_asr(self):
         from faster_whisper import WhisperModel
@@ -135,6 +185,11 @@ class ModelPool:
         return diar
 
     def _load_embedder(self):
+        from .speaker_models import WeSpeakerEmbedder, is_wespeaker_dir
+        wespeaker_dir = Path(self.cfg.model_dir) / "embed" / self.cfg.embed_model
+        if is_wespeaker_dir(wespeaker_dir):
+            return WeSpeakerEmbedder.load(wespeaker_dir, self.device)
+
         from speechbrain.inference import EncoderClassifier
         # speechbrain defaults to LocalStrategy.SYMLINK when linking the hub cache into
         # savedir, which is fatal on Windows: creating a symlink needs admin or developer
@@ -152,24 +207,6 @@ class ModelPool:
         md = Path(self.cfg.model_dir)
         return SentenceTransformer(str(md / "text" / self.cfg.text_embed_model), device=self.device)
 
-    def _load_sentiment(self):
-        # Sentiment is the one optional model: it isn't in REGISTRY.yaml's required set, so a
-        # MODEL_DIR without it still yields a fully working pipeline (stages/sentiment.py
-        # no-ops and warns).
-        md = Path(self.cfg.model_dir)
-        sent_dir = md / "sentiment" / self.cfg.sentiment_model
-        if not sent_dir.exists():
-            return None, None
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
-        tok = AutoTokenizer.from_pretrained(str(sent_dir), local_files_only=True)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            str(sent_dir), local_files_only=True,
-            # fp16 halves both VRAM and latency for a classifier this size; the argmax
-            # label is unchanged by the precision drop, only the confidence's last digits
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-        ).to(self.device).eval()
-        return tok, model
-
     @property
     def asr(self):
         return self._get("asr")
@@ -185,11 +222,3 @@ class ModelPool:
     @property
     def text_embedder(self):
         return self._get("text_embedder")
-
-    @property
-    def sentiment_tokenizer(self):
-        return self._get("sentiment")[0]
-
-    @property
-    def sentiment(self):
-        return self._get("sentiment")[1]

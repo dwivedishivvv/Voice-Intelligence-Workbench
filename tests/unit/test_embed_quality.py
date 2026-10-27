@@ -83,6 +83,34 @@ def test_padding_is_declared_so_the_encoder_ignores_it():
     assert out.shape == (2, 3)
 
 
+def test_one_long_row_does_not_pad_every_other_row_to_its_length():
+    """An 8-minute clip with a 336s monologue padded all its rows to 336s in one pass and
+    ran a 6GB GPU out of memory. The long row now runs alone; the short ones still share."""
+    pool = FakePool()
+    segs = [tone(2.0), tone(60.0, seed=1), tone(1.0, seed=2), tone(2.0, seed=3)]
+    out = encode_many(pool, segs, budget_s=20.0)
+    widths = sorted(c["shape"] for c in pool.embedder.calls)
+    assert widths == [(1, 60 * SR), (3, 2 * SR)]
+    # results land back in the caller's order, not the grouping order
+    alone = encode_many(FakePool(), [segs[1]])[0]
+    np.testing.assert_allclose(out[1], alone, atol=1e-6)
+    assert out.shape == (4, 3)
+
+
+def test_a_batch_that_runs_out_of_memory_is_retried_row_by_row():
+    class OOMOnBatch(FakeEmbedder):
+        def encode_batch(self, wavs, wav_lens=None):
+            if wavs.shape[0] > 1:
+                raise torch.OutOfMemoryError("CUDA out of memory")
+            return super().encode_batch(wavs, wav_lens)
+
+    pool = FakePool()
+    pool.embedder = OOMOnBatch()
+    out = encode_many(pool, [tone(1.0), tone(2.0, seed=1)])
+    assert out.shape == (2, 3)
+    assert [c["shape"][0] for c in pool.embedder.calls] == [1, 1]
+
+
 def test_embeddings_come_back_unit_length():
     out = encode_many(FakePool(), [tone(1.0), tone(2.0)])
     for row in out:

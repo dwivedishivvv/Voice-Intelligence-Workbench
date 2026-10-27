@@ -13,22 +13,6 @@ from ..services import agent as agent_svc, graph_context
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
 
 
-class AnalyzeBody(BaseModel):
-    prompt: str
-
-
-@router.post("/analyze")
-async def analyze(body: AnalyzeBody, user=Depends(get_current_user)):
-    """A short, tool-less LLM note over text the caller already assembled — e.g. a live
-    session's lap timing plus the radio chatter transcribed during it. See
-    agent_svc.analyze's docstring for why this does not reuse /ask's corpus-QA agent."""
-    cfg = await get_effective_settings()
-    try:
-        return await agent_svc.analyze(body.prompt, cfg)
-    except agent_svc.LLMUnavailable as e:
-        raise HTTPException(503, str(e)) from e
-
-
 class AskBody(BaseModel):
     question: str
     # Prior turns, verbatim from a previous response's `history`. The API is stateless by
@@ -59,11 +43,16 @@ async def ask(body: AskBody, user=Depends(get_current_user)):
     except agent_svc.LLMUnavailable as e:
         # 503, not 500: disabled or unconfigured is a deployment state, not a bad request.
         raise HTTPException(503, str(e)) from e
+    except agent_svc.LLMRequestFailed as e:
+        # 502: the upstream model refused or failed (rate/size limit, outage, bad model id)
+        # after the loop's own recovery. The reason is the useful part -- it says whether
+        # to retry, wait for the minute to roll over, or pick another model.
+        raise HTTPException(502, str(e)) from e
     except GraphUnavailable as e:
         raise HTTPException(503, f"agent needs the graph: {e}") from e
 
     # Resolve each cited id to something the UI can render and link: the quote, who said
-    # it, the lap, and the clip plus offset to seek to. Done here rather than in the browser
+    # it, and the clip plus offset to seek to. Done here rather than in the browser
     # so a citation is never a bare uuid the user has to go and look up themselves -- an
     # answer you cannot check is the failure mode the whole citation contract exists to
     # prevent. Best-effort: a missing graph costs the links, not the answer.
@@ -100,8 +89,10 @@ async def ask(body: AskBody, user=Depends(get_current_user)):
         "ws_url": f"/v1/ws/jobs/{conversation_id}",
         **result,
         # Echoed back so the next turn can be sent without the client reconstructing it.
-        "history": (body.history or []) + [
+        # Normalised, so a client that sent {question, answer} pairs gets back the
+        # role/content form the service is written against.
+        "history": agent_svc.normalise_history(body.history) + [
             {"role": "user", "content": body.question},
             {"role": "assistant", "content": result["answer"]},
-        ] if result["answer"] else (body.history or []),
+        ] if result["answer"] else agent_svc.normalise_history(body.history),
     }

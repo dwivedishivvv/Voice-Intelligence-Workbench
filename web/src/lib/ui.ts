@@ -1,5 +1,5 @@
 /** Shared vocabulary for the Industry design system: the colours the workbench assigns
- *  to identification outcomes, voices and tone readings, plus the formatters used in the
+ *  to identification outcomes and voices, plus the formatters used in the
  *  monospace metric strips. Colours are CSS custom properties, so every one of them
  *  follows the light/dark theme automatically. */
 
@@ -45,19 +45,6 @@ export function voiceColor(label: string) {
   for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
   return VOICE_PALETTE[h % VOICE_PALETTE.length];
 }
-
-export type Mood = "calm" | "stressed" | "tired";
-export const MOOD_COLOR: Record<string, string> = {
-  calm: GREEN, stressed: RED, tired: AMBER,
-};
-/** How full the tone meter reads. Heuristic bands, not a measurement. */
-export const MOOD_PCT: Record<string, string> = {
-  calm: "30%", tired: "58%", stressed: "74%",
-};
-
-export const SENTIMENT_COLOR: Record<string, string> = {
-  positive: GREEN, negative: RED, neutral: muted(45),
-};
 
 export const QUALITY_COLOR: Record<string, string> = {
   good: TEXT, fair: AMBER_INK, poor: RED,

@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from common import db, audit as audit_mod, speaker as sc
+from common import db, audit as audit_mod, speaker as sc, graph_sync
 from common.config import get_settings, get_effective_settings
 from ..auth import get_current_user
-from ..services import montage as montage_svc
+from ..services import montage as montage_svc, queue
 
 router = APIRouter(prefix="/v1/clusters", tags=["clusters"])
 
@@ -15,8 +15,12 @@ router = APIRouter(prefix="/v1/clusters", tags=["clusters"])
 @router.get("")
 async def list_clusters(user=Depends(get_current_user)):
     rows = await db.fetch(
-        """SELECT id, label, n_members, total_speech_s, intra_cohesion, created_at
-           FROM speaker_clusters WHERE promoted_to IS NULL ORDER BY total_speech_s DESC""")
+        """SELECT k.id, k.label, k.n_members, k.total_speech_s, k.intra_cohesion, k.created_at,
+                  coalesce(m.n_clips, 0) AS n_clips
+           FROM speaker_clusters k
+           LEFT JOIN (SELECT cluster_id, count(DISTINCT clip_id)::int AS n_clips
+                        FROM clip_speakers GROUP BY cluster_id) m ON m.cluster_id = k.id
+           WHERE k.promoted_to IS NULL ORDER BY k.total_speech_s DESC""")
     return {"items": [dict(r) for r in rows]}
 
 
@@ -66,12 +70,41 @@ async def cluster_montage(cluster_id: str, user=Depends(get_current_user)):
 
 
 class PromoteBody(BaseModel):
-    display_name: str
+    display_name: str | None = None
+    # Name the voice as someone already enrolled instead of creating a new profile.
+    profile_id: str | None = None
 
 
 @router.post("/{cluster_id}/promote")
 async def promote(cluster_id: str, body: PromoteBody, user=Depends(get_current_user)):
-    pid = await sc.promote_cluster(cluster_id, body.display_name, await get_effective_settings())
+    if not await db.fetchval(
+            "SELECT 1 FROM speaker_clusters WHERE id=$1 AND promoted_to IS NULL", cluster_id):
+        raise HTTPException(404, "cluster not found or already named")
+    name = (body.display_name or "").strip()
+    if not name and not body.profile_id:
+        raise HTTPException(400, "give a display_name or an existing profile_id")
+    if body.profile_id and not await db.fetchval(
+            "SELECT 1 FROM speaker_profiles WHERE id=$1", body.profile_id):
+        raise HTTPException(404, "profile not found")
+    pid = await sc.promote_cluster(cluster_id, name or None, await get_effective_settings(),
+                                   profile_id=body.profile_id)
     await audit_mod.audit("cluster.promote", "speaker_cluster", cluster_id,
-                           after={"profile_id": pid, "name": body.display_name}, actor=user)
+                           after={"profile_id": pid, "name": name or None}, actor=user)
+    # the new profile may claim this voice in clips that never made it into the cluster
+    await queue.enqueue_reidentify()
+    await graph_sync.resync(queue.redis())
     return {"profile_id": pid}
+
+
+@router.delete("/{cluster_id}")
+async def dismiss(cluster_id: str, user=Depends(get_current_user)):
+    """Forget an unnamed voice: background noise, a one-off caller, a bad diarization
+    split. The clip voices stay; they just stop being grouped, and a later clip can start
+    a fresh cluster if the voice keeps coming back."""
+    if not await db.fetchval("SELECT 1 FROM speaker_clusters WHERE id=$1", cluster_id):
+        raise HTTPException(404, "cluster not found")
+    await db.execute("UPDATE clip_speakers SET cluster_id=NULL WHERE cluster_id=$1", cluster_id)
+    await db.execute("DELETE FROM speaker_clusters WHERE id=$1", cluster_id)
+    await audit_mod.audit("cluster.dismiss", "speaker_cluster", cluster_id, actor=user)
+    await graph_sync.resync(queue.redis())
+    return {"ok": True}

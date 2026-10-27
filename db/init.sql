@@ -4,7 +4,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TYPE clip_status AS ENUM (
   'QUEUED','VALIDATING','PREPROCESSING','TRANSCRIBING','DIARIZING',
-  'RECONCILING','EMBEDDING','IDENTIFYING','POSTPROCESSING','SENTIMENT','INDEXING',
+  'RECONCILING','EMBEDDING','IDENTIFYING','POSTPROCESSING','INDEXING','TAGGING',
   'COMPLETE','FAILED','REJECTED','DEAD'
 );
 CREATE TYPE quality_grade AS ENUM ('good','fair','poor');
@@ -134,7 +134,7 @@ CREATE TABLE speaker_profiles (
   display_name     TEXT NOT NULL,
   notes            TEXT,
   tags             TEXT[] DEFAULT '{}',
-  centroid         VECTOR(192),
+  centroid         VECTOR(256),
   n_enrollments    INT NOT NULL DEFAULT 0,
   total_speech_s   REAL NOT NULL DEFAULT 0,
   mean_reliability REAL,
@@ -151,7 +151,7 @@ CREATE TABLE speaker_enrollments (
   profile_id   UUID NOT NULL REFERENCES speaker_profiles(id) ON DELETE CASCADE,
   clip_id      UUID REFERENCES clips(id) ON DELETE SET NULL,
   local_label  TEXT,
-  embedding    VECTOR(192) NOT NULL,
+  embedding    VECTOR(256) NOT NULL,
   duration_s   REAL NOT NULL,
   n_segments   INT,
   reliability  REAL NOT NULL,
@@ -166,7 +166,7 @@ CREATE INDEX enroll_profile ON speaker_enrollments(profile_id, is_outlier);
 CREATE TABLE speaker_clusters (
   id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   label          TEXT NOT NULL,
-  centroid       VECTOR(192),
+  centroid       VECTOR(256),
   n_members      INT NOT NULL DEFAULT 0,
   total_speech_s REAL NOT NULL DEFAULT 0,
   intra_cohesion REAL,
@@ -179,7 +179,7 @@ CREATE TABLE clip_speakers (
   id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   clip_id        UUID NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
   local_label    TEXT NOT NULL,
-  embedding      VECTOR(192),
+  embedding      VECTOR(256),
   speech_s       REAL NOT NULL,
   n_turns        INT NOT NULL,
   n_segments_used INT,
@@ -289,19 +289,18 @@ CREATE TABLE downloaded_models (
   PRIMARY KEY (category, repo_id)
 );
 
--- Races + sentiment columns. Kept separate and idempotent so it can also be replayed
--- against an already-initialized database (init.sql itself only runs on a fresh volume).
--- Absolute: init.sql is mounted into initdb.d, its siblings into /db (see docker-compose).
-\i /db/races.sql
+-- Replayable schema files. Absolute paths: init.sql is mounted into initdb.d, its
+-- siblings into /db (see docker-compose).
 
--- OpenF1 sessions/drivers/laps + radio-call results. Same reasoning as races.sql, and
--- ordered after it because f1.sql alters clips, which races.sql also touches.
-\i /db/f1.sql
-
--- On-track events read out of speech (common/ontrack.py). Same reasoning as races.sql,
--- and ordered after f1.sql because it alters radio_calls, which f1.sql creates.
-\i /db/ontrack.sql
-
--- Diarization/fingerprinting quality columns. Same reasoning as races.sql; only alters
--- tables init.sql itself creates, so its position among the includes does not matter.
+-- Diarization/fingerprinting quality columns. Kept separate and idempotent so it can
+-- also be replayed against an already-initialized database.
 \i /db/speaker_quality.sql
+
+-- Automatic clip tags + the TAGGING stage.
+\i /db/tagging.sql
+
+-- Which embedding model the stored voiceprints came from (worker/worker/reembed.py).
+\i /db/speaker_space.sql
+
+-- Drops what the removed F1 and sentiment features left on older databases; a no-op here.
+\i /db/retire_f1_sentiment.sql

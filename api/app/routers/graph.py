@@ -44,3 +44,23 @@ async def context(body: ContextBody, user=Depends(get_current_user)):
 
     return {"anchors": anchors, "items": items,
             "context": graph_context.render_context(items, body.max_chars)}
+
+
+@router.get("/map")
+async def corpus_map(limit: int = 600, user=Depends(get_current_user)):
+    """The whole graph minus individual lines of speech: people, voices, recordings,
+    topics, tags, languages and named entities, with the edges between them."""
+    try:
+        return await graph_context.corpus_map(limit)
+    except GraphUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+
+
+@router.get("/node/{node_id}")
+async def node(node_id: str, user=Depends(get_current_user)):
+    """One node's neighbours (strongest edges first) and a few lines of speech attached to
+    it, for the map's side panel."""
+    try:
+        return await graph_context.neighbourhood(node_id)
+    except GraphUnavailable as e:
+        raise HTTPException(503, str(e)) from e

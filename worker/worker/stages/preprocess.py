@@ -11,18 +11,24 @@ from ..audio.quality import compute_quality
 from ..errors import RejectError
 
 
+def normalized(path: str, cfg):
+    """Decoded audio up to the fork: DC removed, high-passed, loudness-normalized. This is
+    the signal voiceprints are taken from (audio_norm), shared with worker/reembed.py so a
+    re-embedded clip is fingerprinted from exactly what the pipeline would have used."""
+    audio = decode_to_array(path, SR)
+    audio = audio - float(np.mean(audio))          # DC removal
+    audio = highpass(audio, SR, cfg.highpass_hz)
+    return loudness_normalize(audio, SR, cfg.target_lufs)
+
+
 def _decode_and_clean(ctx):
     # ffmpeg subprocess + numpy/scipy/noisereduce CPU work — all blocking, so this
     # whole chain runs in a worker thread (see run() below) rather than the shared
     # event loop, so it doesn't stall every other clip's job while it runs.
-    audio = decode_to_array(ctx.raw_path, SR)
-    audio = audio - float(np.mean(audio))          # DC removal
-    audio = highpass(audio, SR, ctx.cfg.highpass_hz)
-
-    audio, input_lufs = loudness_normalize(audio, SR, ctx.cfg.target_lufs)
+    audio, input_lufs = normalized(ctx.raw_path, ctx.cfg)
     audio_norm = audio.copy()                      # fork: faithful copy for embeddings
 
-    audio_clean = denoise(audio, SR, ctx.cfg)
+    audio_clean = denoise(audio, SR, ctx.cfg, device=ctx.pool.device)
     return audio_norm, audio_clean, input_lufs
 
 
@@ -60,5 +66,8 @@ async def run(ctx):
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
         ctx.clip_id, q["snr_db"], q["clipping_ratio"], q["silence_ratio"],
         q["speech_duration_s"], q["bandwidth_hz"], q["dc_offset"], q["input_lufs"], q["grade"])
-    for i, (s, e) in enumerate(ctx.vad):
-        await db.insert("vad_regions", {"clip_id": ctx.clip_id, "idx": i, "start_s": s, "end_s": e})
+    if ctx.vad:
+        # one round trip, not one per region — a long recording has thousands of them
+        await db.pool().executemany(
+            "INSERT INTO vad_regions (clip_id, idx, start_s, end_s) VALUES ($1,$2,$3,$4)",
+            [(ctx.clip_id, i, s, e) for i, (s, e) in enumerate(ctx.vad)])

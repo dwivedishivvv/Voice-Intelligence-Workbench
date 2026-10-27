@@ -1,6 +1,6 @@
 -- Speaker diarization/fingerprinting quality columns.
 --
--- Kept separate and idempotent for the same reason as races.sql and f1.sql: init.sql only
+-- Kept separate and idempotent because init.sql only
 -- ever runs on a fresh postgres volume, so anything that has to reach an already-populated
 -- database has to be replayable on its own. tests/unit/test_sql_replayable.py enforces it.
 

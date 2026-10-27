@@ -153,10 +153,12 @@ downloaded MP3 is deleted afterward — the F1 page replays audio straight from
 
 **Graph projection** (`GRAPH_RAG_PLAN.md`) is a derived read model — Neo4j is wiped and
 re-projected from Postgres, never written to directly — but it *is* wired into ingestion,
-not purely on-demand: `worker/worker/pipeline.py:_sync_graph()` runs
-`common.graph_sync.rebuild()` automatically after a clip reaches `COMPLETE` and after a
-non-errored F1 radio analysis persists (`analyze_f1_radio_job` in
-`worker/worker/main.py`). It's a no-op when `GRAPH_ENABLED=false`, and best-effort when
+not purely on-demand: after a clip finishes, `process_clip_job` calls
+`common.graph_sync.schedule()`, which enqueues one `graph_sync_job` per
+`graph_sync_debounce_s` window (requests in the same window share an arq job id, so they
+coalesce), and that job runs `pipeline._sync_graph()` → `rebuild()` under a Redis lock so
+two rebuilds never interleave. The api's identity edits (speaker rename/merge/delete,
+assignment, clip delete) schedule the same way. It's a no-op when `GRAPH_ENABLED=false`, and best-effort when
 enabled — a `GraphUnavailable`/connection failure is logged and swallowed rather than
 failing the clip, since Neo4j is an optional datastore. Live chunks don't trigger it:
 they persist nothing to Postgres, so there's nothing new for the graph to project.

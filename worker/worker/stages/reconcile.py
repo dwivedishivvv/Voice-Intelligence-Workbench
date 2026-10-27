@@ -1,3 +1,5 @@
+import uuid
+
 import numpy as np
 from common import db
 
@@ -104,24 +106,31 @@ async def run(ctx):
         "language": ctx.language, "language_conf": ctx.language_conf, "text": full_text,
     })
 
-    word_rows = []
+    # Ids are minted here rather than by the column default, so utterances can go in as one
+    # batch like words do: the per-utterance INSERT ... RETURNING id existed only to learn
+    # each id before attaching its words, and cost one round trip per utterance (hundreds
+    # on a long recording).
+    utt_rows, word_rows = [], []
     for u in ctx.utterances:
-        uid = await db.insert("utterances", {
-            "transcript_id": ctx.transcript_id, "clip_id": ctx.clip_id, "idx": u["idx"],
-            "start_s": u["start"], "end_s": u["end"], "local_label": u["local_label"],
-            "text": u["text"], "mean_word_conf": u["mean_word_conf"],
-            "mean_speaker_conf": u["mean_speaker_conf"], "overlap_ratio": u["overlap_ratio"],
-        })
+        uid = str(uuid.uuid4())
         u["id"] = uid
+        utt_rows.append((uid, ctx.transcript_id, ctx.clip_id, u["idx"], u["start"], u["end"],
+                         u["local_label"], u["text"], u["mean_word_conf"],
+                         u["mean_speaker_conf"], u["overlap_ratio"]))
         word_rows.extend(
             (uid, ctx.clip_id, wi, w["word"], w["start"], w["end"],
              w["probability"], w["local_label"], w["speaker_conf"], w["smoothed"])
             for wi, w in enumerate(u["words"]))
 
+    if utt_rows:
+        await db.pool().executemany(
+            """INSERT INTO utterances (id, transcript_id, clip_id, idx, start_s, end_s,
+                   local_label, text, mean_word_conf, mean_speaker_conf, overlap_ratio)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
+            utt_rows)
+
     # Words are the highest-cardinality table in the pipeline — an hour of speech is
-    # ~10k rows, and inserting them one await at a time was ~10k sequential round trips,
-    # by far the slowest thing in this stage. The utterance inserts stay individual
-    # because each one's generated id is needed to attach its words.
+    # ~10k rows, and inserting them one await at a time was ~10k sequential round trips.
     if word_rows:
         await db.pool().executemany(
             """INSERT INTO words (utterance_id, clip_id, idx, word, start_s, end_s,

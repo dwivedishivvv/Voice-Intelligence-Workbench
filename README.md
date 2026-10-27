@@ -6,20 +6,20 @@ identify speakers → index — then lets you review, correct, search, and expor
 Models live on disk under `MODEL_DIR` and run with `HF_HUB_OFFLINE=1`:
 no audio and no text ever leaves the box.
 
-Two optional features are the exceptions, both off by default: **Race Radio** fetches F1
-session data from OpenF1, and the **agent layer** (`LLM_ENABLED`) sends transcript excerpts
-to a hosted model. With both disabled — the default — the core pipeline makes no
-outbound calls at all.
+One optional feature is the exception, off by default: the **agent layer** (`LLM_ENABLED`)
+sends transcript excerpts to a hosted model. With it disabled — the default — the core
+pipeline makes no outbound calls at all.
 
-Two ways in: **batch upload** and **live microphone transcription**. Race Radio is an
-API-only ingestion path (`/v1/f1`) with no screen of its own.
+Two ways in: **batch upload** and **live microphone transcription**. Everything processed is
+projected into a **knowledge graph** of people, voices, recordings, topics and the named
+things the transcripts mention, which you can explore on the Graph page or question
+through the agent.
 
 The interface is built on the **Industry** design system: square hairline frames, Barlow
 Condensed headings, monospace for every number, and a four-state vocabulary for
 identification — named, suggested, unknown, and *declined to judge*, the last drawn hatched
 so a refusal never reads as a result.
 
-![Clip Library](presentation/screenshots/library.png)
 
 ---
 
@@ -34,7 +34,6 @@ so a refusal never reads as a result.
 - [The pipeline, stage by stage](#the-pipeline-stage-by-stage)
 - [Speaker identification model](#speaker-identification-model)
 - [Search](#search)
-- [Race Radio (F1)](#race-radio-f1)
 - [Live transcription](#live-transcription)
 - [Model catalog](#model-catalog)
 - [API reference](#api-reference)
@@ -60,13 +59,12 @@ so a refusal never reads as a result.
 | Clustering | unknown voices cluster across clips; promote a cluster to a real profile in one click |
 | Calibration | EER sweep over enrolled data to sanity-check the identification threshold |
 | Search | Postgres FTS, semantic (MiniLM + pgvector HNSW), or hybrid via reciprocal rank fusion |
-| Sentiment | multilingual XLM-R over the transcript, fused with the acoustic tone read; stored per utterance and rolled up per speaker |
-| Races | group recordings by race, bulk upload, SVG track outline, per-voice filtering and analysis |
+| Speakers | create, rename, tag, annotate, merge several at once, delete or fold into another; duplicate-voice suggestions; per-person recordings, lines, connections and samples |
+| Library | bulk reprocess / tag / review-flag / delete, rename, notes, and per-line transcript correction that re-indexes search |
 | Export | SRT, VTT, RTTM, JSON, TXT |
-| Live | mic capture, pause-aligned chunking, transcript + tone read (no per-chunk speaker ID) |
-| Race Radio | OpenF1 session/driver/lap data, radio ingestion, heuristic tone classification (API only, no UI page) |
+| Live | mic capture, pause-aligned chunking, a transcript that builds as you speak (no per-chunk speaker ID) |
 | Ops | structured logs with correlation IDs, Prometheus metrics, hash-chained audit log, deletion receipts |
-| Graph | optional Neo4j projection of clips, speakers, drivers, sessions and laps — a derived read model rebuilt from Postgres |
+| Graph | Neo4j projection of speakers, unnamed voices, clips, utterances, topics, tags, languages and named entities, with an interactive map — a derived read model rebuilt from Postgres |
 | Tuning | every pipeline knob editable live from the UI — applies to the next job, no restart |
 | Models | download and activate alternate ASR/diarization/embedding models from Settings |
 | Agent | optional LLM that answers questions by querying the corpus with read-only tools, and cites the speech ids behind every claim (off by default) |
@@ -138,50 +136,64 @@ rebuilt at any time, and with it disabled every other page behaves exactly as be
 
 ```powershell
 docker compose up -d neo4j
-# db/init.sql only runs on a *fresh* postgres volume, so an existing database needs the
-# new tables replayed. f1.sql is written to be idempotent precisely for this:
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $env:POSTGRES_USER -d $env:POSTGRES_DB < db/f1.sql
 python -m common.graph_sync --full  # project Postgres into Neo4j, prints per-label counts
 ```
+
+The api replays every idempotent schema file in `db/` at startup (`common/schema.py`), so an
+existing database picks up new columns without a manual `psql` step.
 
 The sync prints what it *sent* next to what actually *landed*. Those two agreeing is the
 check that matters: relationship projections MATCH their endpoints rather than creating
 them, so a dropped endpoint shows up as a gap between the two columns rather than as an
 error.
 
-Then browse it at `http://localhost:7474`. `POST /v1/admin/graph/sync` does the same thing
-over HTTP and writes an `audit_log` row.
+Explore it on the **Graph** page, browse it raw at `http://localhost:7474`, or rebuild it
+with `POST /v1/admin/graph/sync` (which also writes an `audit_log` row). The worker rebuilds
+it on its own after every clip completes and after every identity correction, debounced.
 
-What gets projected: speakers, clips, utterances, races, and the F1 side (sessions,
-drivers, teams, circuits, laps, radio calls). Utterances and radio calls share a `:Speech`
-label — they are the same kind of thing, a unit of transcribed speech with a tone read,
-and only differ in how much of the pipeline has touched them.
+What gets projected (`common/graph_sync.py` is the single source):
 
-Two edges do the analytical work. `DURING_LAP` ties a moment of speech to the lap it
-happened on, which is what makes "was the tone stressed on the lap that lost time" a single
-hop; it needs a wall-clock timestamp, so radio calls (which carry one from OpenF1) get it
-and manually uploaded clips without `recorded_at` do not. `MENTIONS` links speech to the
-drivers, teams and circuits named in it, via a dictionary matcher over `f1_aliases` rather
-than an NER model — the vocabulary is closed, small, and already in the database.
+| Node | From |
+|---|---|
+| `Speaker` | enrolled profiles, with status, notes and tags |
+| `Voice` | recurring unnamed voices (unpromoted clusters still heard somewhere) |
+| `Clip` | processed recordings, with language, length and audio grade |
+| `Utterance:Speech` | each diarized turn (switch off with `graph_utterance_nodes` on a large corpus) |
+| `Topic` | automatic topic tags |
+| `Tag` | your own clip and speaker tags |
+| `Language` | detected languages |
+| `Entity` | people, companies and places named in the transcripts (`common/entities.py`) |
 
-`POST /v1/graph/context` is what reads it back: the query is ranked in Postgres (the same
-hybrid search the search page uses, widened to cover radio calls), each hit's neighbourhood
-is pulled from Neo4j in one round trip, and the result is rendered as short lines rather
-than returned as raw JSON:
+| Edge | Meaning |
+|---|---|
+| `APPEARS_IN` / `HEARD_IN` | a speaker / unnamed voice in a clip, with speech seconds and talk share |
+| `SPOKEN_BY`, `IN_CLIP`, `NEXT` | who said a line, where, and what came next |
+| `TALKED_WITH` | two speakers share recordings (weighted by how many) |
+| `ABOUT`, `DISCUSSED` | a clip's topics, and the topics each speaker's recordings cover |
+| `MENTIONS`, `MENTIONED` | lines and clips that name an entity; the people who name it |
+| `CO_MENTIONED` | two entities named in the same recording |
+| `TAGGED`, `IN_LANGUAGE` | tags and language |
+
+Entities come from capitalised spans in the ASR text, not a model, and the extractor is
+tuned to abstain: a sentence-initial word only counts if it also appears mid-sentence, and a
+name must recur `graph_entity_min_mentions` times (default 2) before it becomes a node.
+
+`POST /v1/graph/context` reads it back for retrieval: the query is ranked in Postgres (the
+same hybrid search the search page uses), each hit's neighbourhood is pulled from Neo4j in
+one round trip, and the result is rendered as short lines rather than raw JSON:
 
 ```
-[abc-123] Monaco Grand Prix 2024 | VER (Red Bull Racing)
-  tone: voice reads stressed, words read negative (-0.62)
-  "I can't get past, the tyres are gone"
-  lap 42: 74.8s (+0.9s vs previous)
-  mentions: LEC (driver)
+[abc-123] clip "board_call.wav" at 1:15 | Marta
+  "Reliance led the round and Dunzo needed their sign-off"
+  names: Reliance, Kabir Biswas (person)
+  recording topics: quick commerce
+  before (Dan): "What happened with the funding?"
 ```
 
-Tone is always phrased as a reading, never as a fact — the classifier behind it is a
-threshold heuristic (`worker/worker/audio/tone.py`), and the block leads with its speech id
-so any claim built on it can be traced back to the recording.
+Every block leads with its speech id, so any claim built on it can be traced back to the
+recording. `GET /v1/graph/map` and `GET /v1/graph/node/{id}` feed the Graph page.
 
-See `GRAPH_RAG_PLAN.md` for the full node/edge model and what is deliberately left out.
+See `GRAPH_RAG_PLAN.md` for the original design notes.
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/) — see `pyproject.toml`'s
 `api` and `worker` extras. The worker needs Python 3.11 and a CUDA build of torch; the
@@ -228,12 +240,9 @@ Hugging Face cache copies instead (`WinError 1314` is the symptom when it doesn'
 ## The screens
 
 Eight screens behind one sidebar, which carries live counts for each: Library, Review queue,
-Ask, Upload, Live, Races, Speakers, Settings. Light and dark are both first-class — the
+Ask, Upload, Live, Speakers, Graph, Settings. Light and dark are both first-class — the
 palette is a set of CSS variables swapped by a `data-theme` attribute, toggled at the bottom
 of the sidebar and remembered per browser.
-
-> The screenshots below predate the Industry redesign and show the previous interface. The
-> behaviour each one describes is current; the styling is not.
 
 ### Upload
 
@@ -247,7 +256,6 @@ Duplicates are recognised by audio rather than filename and jump to the existing
 A rejection states its reason and is never retried silently — `Why?` opens the worker's
 own verdict on that file.
 
-![Upload](presentation/screenshots/upload.png)
 
 ### Clip Library
 
@@ -261,7 +269,10 @@ a single accuracy number.
 Deleting asks for the filename back, and counts what goes with the clip first — turns,
 words, embeddings, and any profile enrollment that came from it.
 
-![Clip Library](presentation/screenshots/library.png)
+Tick rows to act on many at once: reprocess, add or remove a tag, flag for or clear from
+review, or delete (confirmed in the bar itself). **Edit** renames a clip and changes its
+tags, note and review flag.
+
 
 ### Clip detail
 
@@ -283,10 +294,11 @@ number:
 The threshold marks on those bars are read from live settings, not hard-coded: they are
 tunable, and a stale mark would be a lie.
 
-The transcript is speaker-tagged with a tone meter per turn; words below 0.5 confidence
-carry a dotted amber underline and their score on hover, and any word seeks on click. The
-side rail splits attribution coverage four ways and keeps text sentiment and voice tone
-apart, counting where they disagree instead of averaging them.
+The transcript is speaker-tagged; words below 0.5 confidence carry a dotted amber underline
+and their score on hover, and any word seeks on click. **Edit** on a line corrects what the
+ASR misheard — full-text and semantic search both pick up the correction, and so does the
+graph on its next rebuild. The side rail splits attribution coverage four ways and links to
+the recording's neighbourhood in the graph.
 
 A correction is training data, not a UI edit: it re-enrolls and recomputes the centroid,
 and says so before you save — including that enrollment will be skipped, with a reason, if
@@ -295,17 +307,14 @@ the audio can't support it.
 `Reprocess` reruns the pipeline with current settings. `Export SRT` and the other formats
 (VTT, RTTM, JSON, TXT) come off `/v1/clips/{id}/export/{fmt}`.
 
-![Clip detail](presentation/screenshots/clip-detail.png)
 
 ### Live transcription
 
 Speak into the mic. Each chunk cuts on your next natural pause rather than a fixed timer,
-so words don't get split mid-sentence. A live session is transcript and tone only — it does
-not run identification per chunk, and the screen says so rather than showing a name it
-cannot stand behind. The side rail carries the input level, the tone strip across the
-session, and which tools ran locally versus off-box (everything here is local).
+so words don't get split mid-sentence. A live session is transcript only — it does not run
+identification per chunk, and the screen says so rather than showing a name it cannot stand
+behind.
 
-![Live transcription](presentation/screenshots/live.png)
 
 ### Ask
 
@@ -314,35 +323,45 @@ threads live in the browser, because the API answers one question at a time and 
 conversation of its own.
 
 Every claim comes back with the clip it came from: cited ids become numbered chips in the
-prose that jump to their evidence card, and each card carries the quote, the voice and text
-readings side by side, and a **Listen at** link that lands the player on that second.
+prose that jump to their evidence card, and each card carries the quote, the recording it
+came from, the names it mentions, and a player that starts on that second.
 Passages the model read but did not cite are shown separately, hatched, labelled as
 carrying no citation authority. A provenance strip closes each answer with the tools that
 ran, the model, and the token cost — this is the one component that leaves the box, so what
 it did is not hidden behind a spinner.
 
-### Races
-
-A race groups its recordings; filing changes grouping only, and nothing is reprocessed.
-The detail view charts traffic across the weekend by tone, lists the recordings, and
-surfaces **moments worth hearing** — utterances where the two readings disagree, the tone
-reads stressed, or nobody was attributed at all. The side rail splits attribution across
-the weekend into named, grouped-but-unnamed, and unattributed, and links straight into the
-review queue when clips from that race are waiting on a curator.
-
 ### Speaker Directory
 
-Enrolled profiles with enrollment counts and intra-profile cohesion (a low-cohesion warning
-means the enrollments disagree with each other), alongside unclaimed voice clusters awaiting
-review. Each cluster can be **auditioned** before it is named: the montage endpoint stitches
+A searchable, sortable directory of enrolled people. Open one and the detail panel lets you
+rename them inline (a name that collides with someone else offers a merge instead), set
+their status, edit tags and notes, and browse four tabs: **recordings** (with talk share),
+**lines** they spoke, **connections** (who they share recordings with, what they talk about,
+what they name), and **samples** — the enrollments behind the voiceprint, each removable,
+with its similarity to the centroid. Tick several people to merge them in one go; the page
+also lists profile pairs whose voiceprints say they are probably one person. Delete either
+unattributes a person's voices or folds them into someone else.
+
+Below the directory are recurring voices nobody has named yet. Each cluster can be **auditioned** before it is named: the montage endpoint stitches
 that voice's own speech from every clip it appears in, and one plays at a time — two voices
 overlapping is exactly what makes a cluster unrecognisable.
 
-Merging states its arithmetic before you commit (enrollments, speech, cohesion recomputed
-from the combined set) and says plainly that if the two are not the same person, cohesion
-drops and matches get worse — the number after the merge tells you which happened.
+Naming one can create a new person or add the voice to someone already enrolled; a voice
+that is noise or a one-off can be dismissed.
 
-![Speaker Directory](presentation/screenshots/speakers.png)
+Merging states its arithmetic before you commit (samples, recordings, cohesion recomputed
+from the combined set) and says plainly that if they are not the same person, cohesion
+drops and matches get worse — the number after the merge tells you which happened. Notes and
+tags of merged profiles are folded into the kept one, never dropped.
+
+### Graph
+
+An interactive map of the knowledge graph: people, unnamed voices, recordings, topics, your
+tags, languages and named entities, each in its own shape and colour from the design
+tokens, so both themes follow. Drag to pan, scroll to zoom, drag a node to pin it; filter
+by kind, or search for a name. Clicking a node lights its neighbourhood and opens a panel
+with its connections (strongest first), a few lines of speech attached to it, and links to
+the clip or speaker page — or straight into Ask. Other pages link in with `/graph?focus=<id>`.
+
 
 ### Settings
 
@@ -356,17 +375,14 @@ counts how many are currently overridden.
 it would change — `id_threshold` and `verify_threshold`, old value → new, with the measured
 error rate and voice separation behind them. Nothing is written until you apply it.
 
-![Settings — tuning](presentation/screenshots/settings-tuning.png)
 
 The **Models** tab is the on-demand model catalog: see what's active, download an
 alternative, activate it.
 
-![Settings — models](presentation/screenshots/settings-models.png)
 
 **System** shows device, precision, model versions and the read-only environment-level
 settings.
 
-![Settings — system](presentation/screenshots/settings-system.png)
 
 ## The design system
 
@@ -380,7 +396,7 @@ follows.
 | `--color-bg` / `--color-text` / `--color-divider` | the ground, the ink, the hairline |
 | `--color-accent-100…900`, `--color-neutral-100…900` | one shared OKLCH lightness scale, so the same step of any role matches in visual value |
 | `--sig-voice-a` / `--sig-voice-b` | named and suggested voices |
-| `--sig-green` / `--sig-amber` / `--sig-red` | calm, tired, stressed — and the same three for ok / warn / bad |
+| `--sig-green` / `--sig-amber` / `--sig-red` | ok / warn / bad |
 | `--font-heading` (Barlow Condensed) / `--font-body` (Barlow) | headings and prose |
 
 Three rules the screens hold to:
@@ -392,13 +408,13 @@ Three rules the screens hold to:
 - **Consequences precede confirmation.** Every dialog states what saving does, in words, in
   its footer — next to the button that does it.
 
-`web/src/lib/ui.ts` holds the vocabulary in code: the outcome map, the voice palette, tone
-colours, and the formatters. Colours are CSS variables all the way down, so light and dark
+`web/src/lib/ui.ts` holds the vocabulary in code: the outcome map, the voice palette, and
+the formatters. Colours are CSS variables all the way down, so light and dark
 need no JavaScript.
 
 ## The pipeline, stage by stage
 
-`worker/worker/pipeline.py` runs nine stages in order, each in its own file under
+`worker/worker/pipeline.py` runs ten stages in order, each in its own file under
 `worker/worker/stages/`. Every stage emits a start/done event with timings; the progress
 bar uses fixed relative weights (shown below) rather than live averages.
 
@@ -412,7 +428,8 @@ bar uses fixed relative weights (shown below) rather than live averages.
 | 6 | `EMBEDDING` | 5 | ECAPA embedding per speaker, pooled from that speaker's cleanest turns up to `EMBED_TARGET_S` |
 | 7 | `IDENTIFYING` | 3 | Match against profile centroids, reliability-gated (see below) |
 | 8 | `POSTPROCESSING` | 5 | Talk shares, review flags, per-clip speaker rows |
-| 9 | `INDEXING` | 7 | Text embeddings + tsvector for search |
+| 9 | `INDEXING` | 4 | Text embeddings + tsvector for search |
+| 10 | `TAGGING` | 1 | Automatic clip tags (language, voices, named speakers, quality caveats, topics) |
 
 A stage may raise `RejectError` to mark a clip `REJECTED` with a code and detail (too short,
 no speech, unreadable) — distinct from `FAILED`, which is an unexpected exception. Every run
@@ -451,28 +468,8 @@ that disagrees with its own profile gets flagged rather than silently dragging t
 - **`hybrid`** (default) — reciprocal rank fusion: `1/(60+rank_fts) + 1/(60+rank_vec)` over
   the top 200 of each. Catches both exact quotes and paraphrases.
 
-All three accept `speaker_id` to scope results to one person.
-
-## Race Radio (F1)
-
-An ingestion path, not a screen — the UI page was removed in the Industry redesign; the
-endpoints below are unchanged and still callable.
-
-The one component that talks to the network. `api/app/routers/f1.py` proxies
-[OpenF1](https://openf1.org) for sessions, drivers, laps and team-radio metadata, then
-`POST /v1/f1/ingest` downloads a radio call and queues it for analysis. Ingestion refuses
-any URL that isn't an official `livetiming.formula1.com` asset.
-
-Analysis reuses the normal transcription path, then adds a **heuristic** tone classifier
-(`worker/worker/audio/tone.py`): speech rate, pitch mean/variability, energy variance and
-voiced ratio, bucketed into calm / stressed / tired. When a `session_key` and
-`driver_number` are supplied, tone calibrates against that driver's other calls in the same
-session — an EMA baseline over their calm chunks — rather than fixed global thresholds,
-because a driver's normal pitch is not everyone's normal pitch.
-
-This is a threshold heuristic over acoustic features, not a trained speech-emotion model.
-It shows a signal; treat it as one. The seam for swapping in a real SER model is
-`extract_features` + the classifier beneath it.
+All three accept `speaker_id` and `clip_id` to scope results to one person or recording,
+and `tags` to clips carrying every one of them.
 
 ## Live transcription
 
@@ -524,52 +521,63 @@ Every route requires `X-API-Key` (`api/app/auth.py:get_current_user`).
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `` | Upload a clip (multipart, plus `tags`, `notes`) |
-| `GET` | `` | List with `q`, `status`, `needs_review`, offset/limit |
+| `GET` | `` | List with `q`, `status`, `needs_review`, repeatable `tag` (all must match, operator or auto), offset/limit |
+| `GET` | `/tags` | Every tag in use with its clip count, `manual` and `auto` reported apart |
 | `GET` | `/{id}` | Clip metadata and status |
+| `POST` | `/{id}/retag` | Re-derive auto tags from the stored analysis (no reprocess) |
 | `GET` | `/{id}/result` | Full result: quality, turns, utterances, words, speakers |
 | `GET` | `/{id}/audio?variant=original\|processed` | Stream audio |
 | `GET` | `/{id}/export/{srt\|vtt\|rttm\|json\|txt}` | Export |
 | `POST` | `/{id}/reprocess` | Rerun with current settings |
-| `PATCH` | `/{id}` | Edit tags/notes |
+| `PATCH` | `/{id}` | Rename, edit tags/notes/review flag |
+| `POST` | `/bulk` | `{ids, action, tag}` — `delete`, `reprocess`, `add_tag`, `remove_tag`, `mark_reviewed`, `flag_review` |
+| `PATCH` | `/{id}/utterances/{uid}` | Correct one transcript line; re-embeds it for search |
 | `DELETE` | `/{id}` | Delete, writing a deletion receipt |
 | `POST` | `/{id}/speakers/{local_label}/assign` | Correct a speaker — enrolls and recomputes |
 
-**Speakers** — `/v1/speakers`: list/create/get/patch/delete profiles, `/{id}/clips`,
-`/{id}/merge`, `DELETE /{id}/enrollments/{eid}`.
+**Speakers** — `/v1/speakers`: list (with recordings, last heard), create (409 with the
+existing id on a duplicate name), get, `PATCH` (name, status, notes, tags), `DELETE`
+(optionally `?reassign_to=`), `/{id}/clips`, `/{id}/utterances`, `/{id}/relations`,
+`POST /{id}/merge` (`source_ids` — several at once), `GET /merge-suggestions`,
+`/{id}/candidates`, `POST /{id}/claim`, `DELETE /{id}/enrollments/{eid}`.
 
-**Clusters** — `/v1/clusters`: list, get, `POST /{id}/promote` to turn a cluster into a profile.
+**Clusters** — `/v1/clusters`: list, get, montage, `POST /{id}/promote` (a new name, or
+`profile_id` to add the voice to someone enrolled), `DELETE /{id}` to dismiss.
 
-**Search** — `POST /v1/search` (`q`, `mode`, `speaker_id`, `limit`).
+**Search** — `POST /v1/search` (`q`, `mode`, `speaker_id`, `clip_id`, `tags`, `limit`). Each
+hit carries its clip's `filename`.
+
+**Auto tags.** The TAGGING stage writes `clips.auto_tags`, kept apart from the operator's
+`clips.tags`: `lang:`, `voices:solo|dialogue|group`, `speaker:<name>` (confident matches
+only), `audio:clean|poor`, `length:short|long`, `crosstalk`, `asr:low-confidence`, and up to three `topic:` keyphrases (English; KeyBERT-style over the
+search embeddings). Speaker corrections refresh the `speaker:` tags immediately.
 
 **Agent** — `POST /v1/agent/ask` (`question`, optional `history`, optional
 `conversation_id`). Runs against either Anthropic or any OpenAI-compatible endpoint
-(NVIDIA NIM, local vLLM/Ollama) via `LLM_PROVIDER`; the four tools are shared, only the
-loop differs: answers a question by querying the corpus with four read-only tools,
+(Groq, NVIDIA NIM, local vLLM/Ollama) via `LLM_PROVIDER`; the tools are shared, only the
+loop differs: answers a question by querying the corpus with five read-only tools,
 returning the answer plus the speech ids it cited, the tools it used and token usage.
 Blocking, with progress mirrored to `WS /v1/ws/jobs/{conversation_id}`. 503 when
 `LLM_ENABLED=false`.
 
 ### The agent's tools
 
-Four read-only tools, declared in `api/app/services/agent.py`. Each is plain async code
+Five read-only tools, declared in `api/app/services/agent.py`. Each is plain async code
 that knows nothing about who is calling it, so the schema for both wire formats is derived
-from one declaration. Every filter is optional and composes with every other, because
-questions arrive in combinations nobody enumerated in advance.
+from one declaration.
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `search_speech` | `query`, `spoken_by`, `mood`, `limit` | Finds speech by topic, by tone, or both, across processed utterances *and* F1 radio calls. Returns one line per hit: id, speaker, session and lap where known, the tone reading, and a clipped quote. |
-| `expand_speech` | `speech_id` (one id, or several comma-separated) | Everything the graph knows around a piece of speech: speaker, session, the lap and its time against the previous one, entities named, and the lines either side. Names any id the graph did not have rather than returning fewer rows silently. |
-| `driver_timeline` | `session_key`, `driver_number`, `from_lap`, `to_lap` | One driver through one session: lap times with the radio spoken on each lap. The comparison search cannot make, because it ranks speech without knowing what the car was doing. |
-| `compare_speakers` | `profile_id_a`, `profile_id_b` (either accepts a comma-separated list; names work as well as ids) | Contrasts enrolled speakers on counts and aggregate readings. For what was actually said, search instead. |
+| `search_speech` | `query`, `spoken_by`, `limit` | Finds speech by topic, optionally from one speaker. One line per hit: id, speaker, recording and offset, and a quote windowed on the matched words. Says so when no hit actually contains the query's words. |
+| `expand_speech` | `speech_id` (one id, or several comma-separated) | Everything the graph knows around a piece of speech: speaker, recording, names it mentions, the recording's topics, and the lines either side with who said them. |
+| `read_recording` | `recording`, `from_minute` | One recording's transcript in order, paged, for "summarise X" questions search cannot answer. |
+| `related` | `name` | Looks a person, recording, topic or named entity up in the knowledge graph and lists its connections with counts, plus citable lines. |
+| `compare_speakers` | `profile_id_a`, `profile_id_b` (comma-separated lists, names, or `all`) | Contrasts enrolled speakers on how much they talk and where. |
 
-**Topic and tone are different axes.** Tone is a stored label, so no amount of searching
-for the word "stressed" finds speech whose voice reads stressed — that is `mood`, which
-takes `calm`, `stressed` or `tired` and works alone or alongside a topic. With no topic
-the results are ordered by recency, not intensity: the classifier emits a label, not a
-magnitude, so there is no "most stressed". A tone word typed into `query` that matches no
-text falls back to the filter and says so in the result, because a model that reaches for
-the word instead of the filter should not be told the corpus is empty.
+Some OpenAI-compatible endpoints return a model's tool call as text instead of
+`tool_calls` (`search_speech(query="x")`, Hermes `<tool_call>` JSON, Llama
+`<function=…>`, Gemma `call:name{…}`); the loop recognises those and runs them rather than
+showing the call to the user as an answer.
 
 Nothing writes. A test asserts that — the tool bodies and every query constant they reach
 for are scanned for write keywords.
@@ -582,11 +590,19 @@ Neo4j, and returns both the structured rows and a rendered text block. 503 when
 **Admin** — `/v1/admin`: `GET /config`, `GET|PATCH /settings`, `DELETE /settings/{key}`,
 `POST /calibrate`, `GET /calibration/latest`, `GET /corrections?days=`, `GET /stats`,
 `GET /audit?limit=`, `POST /graph/sync`, `GET /graph/summary` (both 503 when
-`GRAPH_ENABLED=false`).
+`GRAPH_ENABLED=false`), `POST /retag` (every clip), `GET /maintenance` (what the
+background pass has done, from the audit log), `POST /maintenance/run`.
+
+**Background maintenance** (`worker/worker/maintenance.py`, every 5 minutes while
+`auto_maintenance` is on): marks clips a lost worker left mid-pipeline `FAILED/STALLED`,
+re-queues `QUEUED` clips whose arq job vanished, enforces `retention_days`, tags untagged
+clips, and — only with `auto_consolidate_clusters` on — merges duplicate voice clusters.
+Every change it makes is audited as `maintenance.*`.
 
 **Models** — `/v1/admin/models`: `GET ``, `POST /pull`, `POST /activate`.
 
-**F1** — `/v1/f1`: `GET /sessions`, `/drivers`, `/laps`, `/team_radio`, `POST /ingest`.
+**Graph** — `GET /v1/graph/map?limit=`, `GET /v1/graph/node/{id}` (neighbours + lines) for
+the Graph page.
 
 **Live** — `POST /v1/live/{session_id}/chunk?seq=`.
 
@@ -611,7 +627,7 @@ wins over the environment for the next job.
 | Identification | `RELIABILITY_*`, `ID_THRESHOLD`, `ID_SUGGEST_DELTA`, `ID_MIN_MARGIN`, `ID_THRESHOLD_PENALTY`, `VERIFY_THRESHOLD`, `CLUSTER_THRESHOLD`, `AUTO_ENROLL*` |
 | Privacy/ops | `LOG_TRANSCRIPTS` (off by default), `RETENTION_DAYS` (0 = keep forever), `API_KEY` |
 | Agent (optional) | `LLM_ENABLED` (**off by default** — the only setting that sends text off the box), `LLM_PROVIDER` (`anthropic` \| `nvidia`), `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, `NVIDIA_BASE_URL`, `LLM_MODEL`, `LLM_MAX_ITERATIONS`, `LLM_MAX_TOKENS`, `LLM_EFFORT` |
-| Graph (optional) | `GRAPH_ENABLED` (off by default), `GRAPH_URI`, `GRAPH_USER`, `GRAPH_PASSWORD` (named `GRAPH_*`, not `NEO4J_*`: the neo4j container reads any `NEO4J_`-prefixed variable as one of its own config settings and won't start on an unknown one) |
+| Graph | `GRAPH_ENABLED` (on by default), `graph_entity_min_mentions`, `graph_utterance_nodes` (both live-tunable), `GRAPH_URI`, `GRAPH_USER`, `GRAPH_PASSWORD` (named `GRAPH_*`, not `NEO4J_*`: the neo4j container reads any `NEO4J_`-prefixed variable as one of its own config settings and won't start on an unknown one) |
 
 ## Data model
 
@@ -633,14 +649,11 @@ calibration_runs     EER sweeps
 deletion_receipts    proof of deletion after the data is gone
 settings_overrides   live tuning
 downloaded_models    model catalog state
-
-f1_sessions ──┬── f1_drivers       OpenF1 session/driver/lap data, cached write-through
-              └── f1_laps          on every proxy call rather than re-fetched each time
-radio_calls          one row per team-radio recording; unique on recording_url, so a
-                     repeat analysis is a database read instead of a re-transcription
-f1_aliases           entity-linking vocabulary for graph MENTIONS edges ('auto' rows are
-                     re-derived each sync, 'manual' rows are yours and are never touched)
 ```
+
+`db/retire_f1_sentiment.sql` drops the tables and columns of the removed F1 (OpenF1
+sessions, laps, team radio, races, on-track events) and sentiment/tone features from
+databases that predate their removal; on a fresh volume it does nothing.
 
 HNSW cosine indexes on `utterances.embedding`, `speaker_profiles.centroid`,
 `speaker_clusters.centroid` and `clip_speakers.embedding`; a GIN index on
@@ -677,10 +690,9 @@ docker compose logs worker | grep models_loaded   # models loaded from local dis
 ```
 
 `worker.pool.verify_models` runs at worker startup and raises if any model in `models/REGISTRY.yaml` is missing —
-see its `verify_models` step. The core pipeline makes no outbound calls. Two optional
-features do, and both are off unless you turn them on: the OpenF1 proxy and radio download
-behind Race Radio, and the agent layer (`LLM_ENABLED=false` by default), which is the only
-thing in the system that sends **transcript text** to a third party. `LLM_ENABLED` is
+see its `verify_models` step. The core pipeline makes no outbound calls. One optional
+feature does, and it is off unless you turn it on: the agent layer (`LLM_ENABLED=false` by
+default), the only thing in the system that sends **transcript text** to a third party. `LLM_ENABLED` is
 deliberately not editable from the Settings page — it lives in `.env`, where enabling it is
 a deliberate, reviewable act rather than a checkbox anyone with the API key can tick.
 
@@ -696,8 +708,9 @@ Everything below is a deliberate simplification with a known ceiling, not an ove
   function is the documented seam for real SSO/RBAC; every route depends on it, not on ad-hoc
   checks.
 - **Pagination** — offset/limit, not cursor. Correct up to a few thousand clips.
-- **Tone classification** — heuristic thresholds over acoustic features, not a trained SER
-  model. See `worker/worker/audio/tone.py`.
+- **Entity extraction** — capitalised spans with abstention rules, not an NER model.
+  `common/entities.py` is the seam: swap `extract`/`mentions` for a model and the graph
+  projection is unchanged.
 - **Phonetic search** (`dmetaphone` for ASR-mangled names) and the **2D embedding plot** —
   not implemented. FTS, semantic and hybrid search all work.
 - **GPU OOM recovery** — arq's normal backoff, not a lower-precision `pool.degraded()`
@@ -710,20 +723,19 @@ Everything below is a deliberate simplification with a known ceiling, not an ove
 ```
 common/          shared by api + worker: config, db (asyncpg+pgvector), storage, audit, speaker logic
 api/             FastAPI — upload, listing, search, admin, correction, model catalog, WS progress
-  app/routers/   clips, speakers, clusters, search, admin, models, f1, live, ws
+  app/routers/   clips, speakers, clusters, search, graph, agent, admin, models, live, ws
 worker/
   worker/stages/ one file per pipeline stage
-  worker/audio/  decode, enhance, quality, vad, tone
+  worker/audio/  decode, enhance, quality, vad
   worker/export/ srt, vtt, rttm, json, txt
   worker/live.py live-mode diarize + identify
   worker/pool.py model pool, loaded once at startup
 web/
   src/style.css  the Industry design system: tokens, light/dark palettes, component classes
-  src/lib/ui.ts  outcome/voice/tone colour vocabulary + the monospace formatters
-  src/pages/     Library (+ Review queue), ClipDetail, Ask, Upload, Live, Races, Speakers, Settings
+  src/lib/ui.ts  outcome/voice colour vocabulary + the monospace formatters
+  src/pages/     Library (+ Review queue), ClipDetail, Ask, Upload, Live, Speakers, Graph, Settings
 db/init.sql      full schema (pgvector + FTS)
 models/          REGISTRY.yaml + prefetch.py, fetched into MODEL_DIR
 tests/unit/      reconciliation, reliability, diarization cleanup, device/model resolution
 scripts/dev.ps1  native Windows dev runner
-presentation/    deck source + screenshots
 ```

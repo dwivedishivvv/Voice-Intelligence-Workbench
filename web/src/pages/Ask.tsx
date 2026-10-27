@@ -1,21 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/api/client";
 import { Dialog } from "@/components/dialog";
 import { useSidebarTakeover } from "@/components/layout";
 import { ExcerptPlayer } from "@/components/excerpt-player";
-import { AMBER_INK, MOOD_COLOR, RED, muted } from "@/lib/ui";
+import { AMBER_INK, RED, muted } from "@/lib/ui";
 
-type Lap = { number: number; duration_s: number | null; prev_s: number | null };
 type Citation = {
-  speech_id: string; text: string | null; mood: string | null;
-  sentiment: string | null; sentiment_score: number | null; text_sentiment: string | null;
-  speaker: string | null; driver: string | null; driver_name: string | null;
-  team: string | null; session: string | null; year: number | null;
-  clip_id: string | null; start_s: number | null; end_s: number | null;
-  laps: Lap[] | null;
+  speech_id: string; text: string | null; speaker: string | null;
+  clip_id: string | null; filename: string | null; start_s: number | null; end_s: number | null;
   mentions: { kind: string; name: string }[] | null;
+  topics: string[] | null;
 };
 type Turn = {
   question: string; answer: string; citations: string[]; sources: string[];
@@ -40,17 +36,22 @@ function saveThreads(t: Thread[]) {
 const TOOL_LABEL: Record<string, string> = {
   search_speech: "searched the corpus",
   expand_speech: "pulled surrounding context",
-  driver_timeline: "walked the lap timeline",
+  read_recording: "read a recording",
+  related: "walked the knowledge graph",
   compare_speakers: "compared speakers",
 };
 
-/** Questions the agent's tools can actually answer. Its search is over what was *said* —
- *  tone and identification outcomes are columns, not words, and no tool reads them, so a
- *  "who sounds stressed" example would only teach the user that Ask is broken. */
+/** "nvidia/nvidia/nemotron-…" read as a typo: NIM model ids already carry the provider. */
+function modelLabel(t: { provider: string; model: string }) {
+  return t.model.startsWith(`${t.provider}/`) ? t.model : `${t.provider}/${t.model}`;
+}
+
+/** Questions the agent's tools can actually answer: what was said, what a recording is
+ *  about, and how people and named things connect in the graph. */
 const EXAMPLES = [
-  "What was said about tyre wear, and who said it?",
-  "Find the radio calls about pit stops",
-  "What did anyone say about the car balance?",
+  "What was said about funding, and who said it?",
+  "Summarise the most recent recording",
+  "Which companies come up together most often?",
 ];
 
 const fmtAt = (s: number | null) =>
@@ -92,11 +93,7 @@ function EvidenceCard({ c, n, refFn }: {
   c: Citation; n: number; refFn: (el: HTMLDivElement | null) => void;
 }) {
   const navigate = useNavigate();
-  const who = c.driver_name || c.driver || c.speaker || "unidentified speaker";
-  const lap = c.laps?.[0];
-  const delta = lap && lap.duration_s != null && lap.prev_s != null
-    ? lap.duration_s - lap.prev_s : null;
-  const disagrees = c.text_sentiment && c.sentiment && c.text_sentiment !== c.sentiment;
+  const who = c.speaker || "unidentified speaker";
 
   return (
     <article ref={refFn} className="blueprint" style={{
@@ -117,14 +114,12 @@ function EvidenceCard({ c, n, refFn }: {
           <span style={{ fontFamily: "var(--font-heading)", fontSize: 15, color: "var(--color-text)" }}>
             {who}
           </span>
-          {c.team && <span>{c.team}</span>}
-          {c.session && <span>{c.session}{c.year ? ` ${c.year}` : ""}</span>}
-          {lap && (
-            <span>
-              lap {lap.number}
-              {lap.duration_s != null && ` · ${lap.duration_s.toFixed(1)}s`}
-              {delta != null && ` (${delta >= 0 ? "+" : ""}${delta.toFixed(1)})`}
-            </span>
+          {c.filename && c.clip_id && (
+            <a href={`/clips/${c.clip_id}?t=${c.start_s ?? 0}`}
+               onClick={(e) => { e.preventDefault(); navigate(`/clips/${c.clip_id}?t=${c.start_s ?? 0}`); }}
+               style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 340 }}>
+              {c.filename}
+            </a>
           )}
         </div>
         {c.text && (
@@ -136,25 +131,6 @@ function EvidenceCard({ c, n, refFn }: {
           </p>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          {c.mood && (
-            <span className="tag mono" style={{
-              border: `1px solid ${MOOD_COLOR[c.mood] || "var(--color-neutral-300)"}`,
-              color: MOOD_COLOR[c.mood] || undefined,
-            }}>
-              voice · {c.mood}
-            </span>
-          )}
-          {c.sentiment && (
-            <span className="tag tag-neutral mono" style={{ border: "1px solid var(--color-neutral-300)" }}>
-              text · {c.sentiment}
-              {c.sentiment_score != null && ` ${c.sentiment_score > 0 ? "+" : ""}${c.sentiment_score.toFixed(2)}`}
-            </span>
-          )}
-          {disagrees && (
-            <span style={{ fontSize: 11.5, color: AMBER_INK }}>
-              text and voice disagree here
-            </span>
-          )}
           {(c.mentions ?? []).filter((m) => m.name).map((m) => (
             <span key={`${m.kind}-${m.name}`} className="tag tag-neutral" style={{ border: "1px solid var(--color-neutral-300)" }}>
               mentions {m.name}
@@ -169,7 +145,7 @@ function EvidenceCard({ c, n, refFn }: {
             <ExcerptPlayer clipId={c.clip_id} startS={c.start_s} endS={c.end_s} />
           ) : (
             <span style={{ fontSize: 12.5, color: muted(55) }}>
-              Team radio · no processed audio to play
+              No audio attached to this line
             </span>
           )}
           <span className="mono" style={{ fontSize: 11.5, color: muted(45) }}>
@@ -185,7 +161,10 @@ export default function Ask() {
   const navigate = useNavigate();
   const [threads, setThreads] = useState<Thread[]>(loadThreads);
   const [activeId, setActiveId] = useState<string | null>(threads[0]?.id ?? null);
-  const [question, setQuestion] = useState("");
+  // Another page (the graph's "Ask about…") can hand over a question to start from.
+  const routerLocation = useLocation();
+  const [question, setQuestion] = useState<string>(
+    (routerLocation.state as { prefill?: string } | null)?.prefill || "");
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<string[]>([]);
   const [disabled, setDisabled] = useState<string | null>(null);
@@ -219,7 +198,7 @@ export default function Ask() {
     if (!active) return;
     const body = active.turns.map((t) =>
       `## ${t.question}\n\n${t.answer}\n\n${t.citation_details.map((c, i) =>
-        `[${i + 1}] ${c.speaker || c.driver_name || "unknown"} — “${c.text || ""}”`).join("\n")}`
+        `[${i + 1}] ${c.speaker || "unknown"} — “${c.text || ""}”`).join("\n")}`
     ).join("\n\n---\n\n");
     const url = URL.createObjectURL(new Blob([`# ${active.title}\n\n${body}\n`], { type: "text/markdown" }));
     const a = document.createElement("a");
@@ -450,7 +429,7 @@ export default function Ask() {
           </h3>
           <span className="mono" style={{ fontSize: 11.5, color: muted(50), whiteSpace: "nowrap" }}>
             {corpus ? `${corpus.clips} clips` : "corpus"}
-            {lastTurn ? ` · ${lastTurn.provider}/${lastTurn.model}` : ""}
+            {lastTurn ? ` · ${modelLabel(lastTurn)}` : ""}
           </span>
         </div>
         {/* Nothing to rename, export or delete until a thread exists — three greyed-out
@@ -506,8 +485,8 @@ export default function Ask() {
                 composed off-box, and every claim comes back with the clip it came from.
               </p>
               <span style={{ fontSize: 12.5, color: muted(55), maxWidth: "58ch" }}>
-                Tone and identification outcomes are not searchable here — those live on the
-                clip pages and the review queue.
+                It can also walk the knowledge graph: who talks with whom, which recordings
+                name a company, what a person tends to discuss.
               </span>
             </div>
             {composer}
@@ -601,7 +580,7 @@ export default function Ask() {
                 fontSize: 11, color: muted(50), flexWrap: "wrap", alignItems: "center",
               }}>
                 {turn.tools_used?.length > 0 && <span>tools: {turn.tools_used.join(", ")}</span>}
-                <span>model: {turn.provider}/{turn.model}</span>
+                <span>model: {modelLabel(turn)}</span>
                 {turn.usage && (
                   <span>
                     {turn.usage.input_tokens.toLocaleString()} in / {turn.usage.output_tokens.toLocaleString()} out
@@ -625,11 +604,6 @@ export default function Ask() {
           </div>
         )}
 
-        {active && (
-          <p style={{ margin: 0, fontSize: 11, color: muted(50) }}>
-            Tone labels are heuristic readings of the audio, not measurements of how anyone felt.
-          </p>
-        )}
         <div ref={bottomRef} />
       </div>
 

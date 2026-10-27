@@ -1,84 +1,153 @@
-"""Dictionary entity linking over F1 transcripts.
+"""Named things in transcripts: the people, companies, places and products a corpus talks
+about, read out of ASR text without a model.
 
-A matcher over a closed alias vocabulary rather than an NER model, for two reasons: the
-vocabulary is small and already in the database (f1_drivers, f1_sessions), and ASR mangles
-proper nouns in ways a general NER has never been trained on — "Verstappen" comes back as
-"Verstapen" often enough that the fix is an alias row, not a better model.
+Proper nouns arrive capitalised from Whisper, and that is the whole signal this uses. It is
+a heuristic, and it is tuned to abstain: a capitalised word at the start of a sentence is
+only a candidate if the same word also appears capitalised mid-sentence somewhere, and
+graph_sync keeps an entity only once the corpus names it more than once
+(graph_entity_min_mentions). A missing entity means "not clearly named", never "not there".
 
-Kept out of graph_sync.py so the matching itself is testable without Postgres or Neo4j;
-it is the part most likely to be wrong, and the part where wrongness is quietest (a
-mention that silently fails to link just produces one fewer edge).
+`kind` is a coarse reading, not a classification: `organisation` for a name containing a
+company word ("Goodwater Capital", "Bank of America"), `person` for two or three plain title-cased words
+("Kabir Biswas"), and `name` for everything else ("Dunzo", "Swiggy", "Bangalore") -- a
+single capitalised word is as often a company as a city, and guessing which would be
+inventing a fact the transcript does not state.
+
+Pure functions, so tests/unit/test_entities.py checks them without a database.
 """
 import re
+from collections import Counter
 
-# alias -> the entities it may refer to. One alias can map to several: a driver's surname
-# is the same across seasons while the number on the car is not, so resolution happens at
-# match time using the session the speech belongs to.
-AliasTable = dict[str, list[tuple[str, str]]]
+# Words Whisper capitalises that are not names: sentence openers, pronouns, fillers, days
+# and months (a date is not a subject), and the title words that begin a name but are not
+# one on their own.
+STOPWORDS = frozenset("""
+a an and are as at be but by can could did do does for from had has have he her here hers
+him his how i i'd i'll i'm i've if in into is it it's its just let let's me my no not now of
+oh ok okay on or our ours she so some such than that that's the their them then there these
+they this those to too up us very was we we're well were what when where which while who why
+will with would yeah yes yep you you're your yours hi hello hey right also because like
+actually basically really maybe sure thanks thank please sorry anyway however although
+after before during since until today tomorrow yesterday first second third next last
+one two three four five six seven eight nine ten hundred thousand million billion
+monday tuesday wednesday thursday friday saturday sunday january february march april
+may june july august september october november december mr mrs ms dr sir madam
+""".split())
+
+ORG_SUFFIXES = frozenset("""
+inc ltd llc plc corp corporation company co group capital ventures partners bank labs
+technologies technology systems solutions holdings foundation institute university
+college school fund network networks media studios motors airlines
+""".split())
+
+# Words allowed *inside* a multi-word name ("Bank of America", "Tata & Sons"). Not "and":
+# "Swiggy and Zomato" is two names, and joining across it would invent a third.
+CONNECTORS = frozenset({"of", "de", "da", "von", "van", "&"})
+
+_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9'’\-]*|&|[.!?]")
+_POSSESSIVE = re.compile(r"['’]s$")
 
 
-def compile_aliases(table: AliasTable):
-    """Build a single alternation regex over every alias.
-
-    One pass per text instead of one pass per (text, alias) pair — with a few thousand
-    utterances and a few dozen aliases that is the difference between one scan and tens
-    of thousands. Longest-first so "red bull racing" wins over "red bull" at the same
-    starting position; Python's alternation returns the first branch that matches, not
-    the longest, so the ordering is doing real work rather than being cosmetic."""
-    if not table:
-        return None
-    ordered = sorted(table, key=len, reverse=True)
-    pattern = re.compile(r"\b(" + "|".join(re.escape(a) for a in ordered) + r")\b",
-                         re.IGNORECASE)
-    return pattern, table
+def _clean(word: str) -> str:
+    return _POSSESSIVE.sub("", word).strip("'’-")
 
 
-def find_mentions(text: str | None, compiled) -> set[tuple[str, str]]:
-    """Every (entity_type, entity_key) named in `text`. Empty set when there is nothing to
-    match against — an unanalyzed call or an empty alias table is normal, not an error."""
-    if not text or compiled is None:
-        return set()
-    pattern, table = compiled
-    found: set[tuple[str, str]] = set()
-    for m in pattern.finditer(text):
-        found.update(table[m.group(1).lower()])
+def _is_name_word(word: str) -> bool:
+    w = _clean(word)
+    if len(w) < 2 or not w[0].isupper() or w.lower() in STOPWORDS:
+        return False
+    # An all-caps word is an acronym ("IBM", "NASA") only while it is short; a long one is
+    # Whisper shouting a whole phrase.
+    return not w.isupper() or (len(w) <= 5 and w.isalpha())
+
+
+def candidates(text: str) -> list[tuple[str, bool]]:
+    """Capitalised spans in `text`, each with whether it opened a sentence.
+
+    A span is a run of name words, optionally joined by connectors ("Bank of America"); a
+    trailing connector is dropped. Returned in order, duplicates kept -- counting is the
+    caller's job."""
+    out: list[tuple[str, bool]] = []
+    tokens = _TOKEN.findall(text or "")
+    sentence_start = True
+    span: list[str] = []
+    span_at_start = False
+
+    def flush():
+        nonlocal span
+        while span and span[-1].lower() in CONNECTORS:
+            span.pop()
+        if span:
+            out.append((" ".join(_clean(w) for w in span), span_at_start))
+        span = []
+
+    for tok in tokens:
+        if tok in ".!?":
+            flush()
+            sentence_start = True
+            continue
+        if _is_name_word(tok):
+            if not span:
+                span_at_start = sentence_start
+            span.append(tok)
+        elif span and tok.lower() in CONNECTORS:
+            span.append(tok)
+        else:
+            flush()
+        sentence_start = False
+    flush()
+    return out
+
+
+def kind_of(name: str) -> str:
+    words = name.split()
+    # Any company word, not only a trailing one: "Bank of America", "University of Leeds".
+    if len(words) > 1 and any(w.lower() in ORG_SUFFIXES for w in words) or "&" in words:
+        return "organisation"
+    if 2 <= len(words) <= 3 and all(w[0].isupper() and w[1:].islower() and w.isalpha()
+                                    for w in words):
+        return "person"
+    return "name"
+
+
+def extract(texts: list[str], min_mentions: int = 2) -> dict[str, dict]:
+    """Corpus-level entities: {name: {kind, n}} for every name mentioned at least
+    `min_mentions` times, at least once mid-sentence.
+
+    Matching is case-insensitive and the most common spelling wins, so "DUNZO" and "Dunzo"
+    are one entity."""
+    found = [c for text in texts for c in candidates(text)]
+    seen_mid = {name.lower() for name, at_start in found if not at_start}
+    counts: Counter[str] = Counter()
+    mid_sentence: set[str] = set()
+    spellings: dict[str, Counter[str]] = {}
+    for name, at_start in found:
+        if at_start and " " in name and name.lower() not in seen_mid:
+            # "See Dunzo ..." opens a sentence with a capitalised verb. Unless the whole
+            # span also appears mid-sentence, the first word is the sentence's, not the name's.
+            name = name.split(" ", 1)[1]
+        key = name.lower()
+        counts[key] += 1
+        spellings.setdefault(key, Counter())[name] += 1
+        if not at_start or key in seen_mid:
+            mid_sentence.add(key)
+    out = {}
+    for key, n in counts.items():
+        if n < min_mentions or key not in mid_sentence:
+            continue
+        name = spellings[key].most_common(1)[0][0]
+        out[name] = {"kind": kind_of(name), "n": n}
+    return out
+
+
+def mentions(text: str, known: dict[str, str]) -> list[str]:
+    """The known entities (lowercase name -> canonical name) that `text` names."""
+    found = []
+    for name, _ in candidates(text):
+        # Longest known suffix of the span, so "See Dunzo" still names Dunzo.
+        words = name.split()
+        canonical = next((known[k] for k in (" ".join(words[i:]).lower()
+                                             for i in range(len(words))) if k in known), None)
+        if canonical and canonical not in found:
+            found.append(canonical)
     return found
-
-
-# Auto-derived aliases are deliberately conservative: surnames of 4+ characters and full
-# team/circuit names. A false MENTIONS edge is worse than a missing one -- it silently
-# pollutes every query that walks it -- so anything ambiguous is left to a hand-added
-# source='manual' row where a session's transcripts justify it.
-#
-# Two exclusions, both evidence-backed against a real 674-utterance corpus:
-#
-#   First names. "Max" and "Lando" are ordinary words in a radio call ("max attack",
-#   "land it").
-#
-#   Three-letter codes (VER, LEC, PER). These were seeded originally and measured zero
-#   true positives: ASR spells names out and never emits a bare code -- a case-sensitive
-#   scan for VER/LEC/HAM/NOR/PER/SAI/RUS/PIA/ALO/GAS across the corpus found none. They
-#   did produce false ones, because the codes are ordinary English: "three seconds *per*
-#   sector" linked to Perez. Zero signal, real noise.
-MIN_SURNAME_LEN = 4
-
-# Every statement is parameterless so the caller can just run the list. MIN_SURNAME_LEN is
-# interpolated rather than bound: it is a module-level int under our control, never input.
-SEED_ALIASES_SQL = [
-    # surname: last whitespace-separated token of the full name
-    f"""INSERT INTO f1_aliases (alias, entity_type, entity_key, source)
-       SELECT DISTINCT lower(regexp_replace(btrim(full_name), '^.*\\s+', '')),
-              'driver', driver_number::text, 'auto'
-       FROM f1_drivers
-       WHERE full_name IS NOT NULL
-         AND length(regexp_replace(btrim(full_name), '^.*\\s+', '')) >= {MIN_SURNAME_LEN}
-       ON CONFLICT DO NOTHING""",
-    """INSERT INTO f1_aliases (alias, entity_type, entity_key, source)
-       SELECT DISTINCT lower(team_name), 'team', team_name, 'auto'
-       FROM f1_drivers WHERE team_name IS NOT NULL
-       ON CONFLICT DO NOTHING""",
-    """INSERT INTO f1_aliases (alias, entity_type, entity_key, source)
-       SELECT DISTINCT lower(circuit), 'circuit', circuit, 'auto'
-       FROM f1_sessions WHERE circuit IS NOT NULL
-       ON CONFLICT DO NOTHING""",
-]

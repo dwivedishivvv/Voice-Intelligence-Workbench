@@ -9,67 +9,38 @@ capability.
 `render_context` is the part that decides whether any of this is useful. A JSON dump of
 the expansion is expensive to read and easy to misread; short natural-language lines are
 not. It is a pure function so it can be tested without either database.
+
+`corpus_map` is the other reader: the whole graph minus individual lines of speech, shaped
+for the Graph page to draw.
 """
 from common import db, graph
-from common.ontrack import BY_NAME as _EVENT_TYPES
 
-# type -> the wording used when an event is shown. Read from the taxonomy so the phrasing
-# cannot drift from the definition it came from.
-ONTRACK_READS = {name: e.reads_as for name, e in _EVENT_TYPES.items()}
-
-# One round trip. Every relationship is OPTIONAL: a manually uploaded clip has no session
-# and no lap, an unenrolled voice has no speaker, and a partial neighbourhood is the
-# normal case rather than an error.
+# One round trip. Every relationship is OPTIONAL: an unenrolled voice has no speaker, a
+# line that names nothing has no entities, and a partial neighbourhood is the normal case
+# rather than an error.
 #
 # collect() drops nulls, and the CASE keeps that true for the map projections -- without
-# it a speech with no lap would collect a map full of nulls instead of an empty list.
+# it a speech that names nothing would collect a map full of nulls instead of an empty list.
 EXPAND_CYPHER = """
 UNWIND $ids AS sid
 MATCH (sp:Speech {speech_id: sid})
 OPTIONAL MATCH (sp)-[:SPOKEN_BY]->(spk:Speaker)
 OPTIONAL MATCH (sp)-[:IN_CLIP]->(clip:Clip)
-OPTIONAL MATCH (sp)-[:BY_DRIVER]->(drv_direct:Driver)
-// RadioCall gets BY_DRIVER straight from OpenF1's driver number. An Utterance never
-// does -- it only carries an enrolled Speaker -- so a race-context utterance chains
-// through VOICE_OF (Driver-[:VOICE_OF]->Speaker) to recover the same driver identity
-// that render_context/render_brief prefer over the bare speaker name. Without this a
-// driver's own enrolled voice showed up as "unidentified speaker" on every clip that
-// wasn't a radio call.
-OPTIONAL MATCH (drv_voice:Driver)-[:VOICE_OF]->(spk)
-WITH sid, sp, spk, clip, coalesce(drv_direct, drv_voice) AS drv
-OPTIONAL MATCH (sp)-[:IN_SESSION]->(sess)
 OPTIONAL MATCH (prev:Speech)-[:NEXT]->(sp)
 OPTIONAL MATCH (sp)-[:NEXT]->(nxt:Speech)
-OPTIONAL MATCH (sp)-[:DURING_LAP]->(lap:Lap)
-OPTIONAL MATCH (sp)-[:MENTIONS]->(ent)
-OPTIONAL MATCH (sp)-[reads:READS_AS]->(evt:EventType)
-OPTIONAL MATCH (sp)-[inv:INVOLVES]->(other:Driver)
+OPTIONAL MATCH (sp)-[:MENTIONS]->(ent:Entity)
+OPTIONAL MATCH (clip)-[:ABOUT]->(topic:Topic)
 RETURN sid AS speech_id,
-       sp.text AS text, sp.mood AS mood, sp.start_s AS start_s, sp.end_s AS end_s,
-       sp.sentiment AS sentiment, sp.sentiment_score AS sentiment_score,
-       sp.text_sentiment AS text_sentiment,
+       sp.text AS text, sp.start_s AS start_s, sp.end_s AS end_s,
        spk.name AS speaker,
        clip.clip_id AS clip_id, clip.filename AS filename,
-       coalesce(drv.code, drv.full_name) AS driver, drv.full_name AS driver_name,
-       drv.team AS team,
-       sess.name AS session, sess.year AS year, sess.circuit AS circuit,
        prev.text AS prev_text, nxt.text AS next_text,
-       collect(DISTINCT CASE WHEN lap IS NULL THEN null ELSE {
-         number: lap.number,
-         duration_s: lap.duration_s,
-         prev_s: head([(p:Lap)-[:NEXT]->(lap) | p.duration_s]),
-         next_s: head([(lap)-[:NEXT]->(n:Lap) | n.duration_s])
-       } END) AS laps,
+       head([(prev)-[:SPOKEN_BY]->(ps:Speaker) | ps.name]) AS prev_speaker,
+       head([(nxt)-[:SPOKEN_BY]->(ns:Speaker) | ns.name]) AS next_speaker,
        collect(DISTINCT CASE WHEN ent IS NULL THEN null ELSE {
-         kind: head(labels(ent)),
-         name: coalesce(ent.code, ent.full_name, ent.name)
+         kind: ent.kind, name: ent.name
        } END) AS mentions,
-       collect(DISTINCT CASE WHEN evt IS NULL THEN null ELSE {
-         type: evt.name, family: evt.family, score: reads.score
-       } END) AS events,
-       collect(DISTINCT CASE WHEN other IS NULL THEN null ELSE {
-         driver: coalesce(other.code, other.full_name), event_type: inv.event_type
-       } END) AS event_targets
+       collect(DISTINCT topic.name) AS topics
 """
 
 
@@ -84,11 +55,10 @@ async def expand(speech_ids: list[str]) -> list[dict]:
 
 
 # The same fields EXPAND_CYPHER returns, from the tables the graph is projected *from*.
-# Speaker resolution mirrors the utterances view: clip_speakers is the authoritative
-# identity row and utterances.profile_id can lag it, so either may carry the name.
+# Speaker resolution: clip_speakers is the authoritative identity row and
+# utterances.profile_id can lag it, so either may carry the name.
 RESOLVE_UTTERANCES_SQL = """
-SELECT u.id::text AS speech_id, u.text, u.mood, u.start_s, u.end_s,
-       u.sentiment, u.sentiment_score, u.text_sentiment,
+SELECT u.id::text AS speech_id, u.text, u.start_s, u.end_s,
        p.display_name AS speaker, u.clip_id::text AS clip_id, c.filename
   FROM utterances u
   JOIN clips c ON c.id = u.clip_id
@@ -97,27 +67,16 @@ SELECT u.id::text AS speech_id, u.text, u.mood, u.start_s, u.end_s,
  WHERE u.id = ANY($1::uuid[])
 """
 
-RESOLVE_RADIO_SQL = """
-SELECT rc.id::text AS speech_id, rc.text, rc.mood, rc.clip_id::text AS clip_id,
-       d.name_acronym AS driver, d.full_name AS driver_name, d.team_name AS team,
-       s.name AS session, s.year, s.circuit
-  FROM radio_calls rc
-  LEFT JOIN f1_drivers d
-         ON d.driver_number = rc.driver_number AND d.session_key = rc.session_key
-  LEFT JOIN f1_sessions s ON s.session_key = rc.session_key
- WHERE rc.id = ANY($1::uuid[])
-"""
-
 
 async def resolve(speech_ids: list[str]) -> list[dict]:
     """Everything known about each id, graph first, Postgres for the rest.
 
     The graph is a *derived* read model, rebuilt by an explicit sync — so it is routinely
     behind the corpus, and any id processed since the last sync expands to nothing. That
-    is tolerable for the lap and entity edges, which only the graph has. It is not
-    tolerable for the quote, the speaker and the clip offset: those are what turn a cited
-    id into a link the reader can check, and resolving them only through the graph meant a
-    stale projection silently produced an answer whose citations went nowhere.
+    is tolerable for the entity edges, which only the graph has. It is not tolerable for
+    the quote, the speaker and the clip offset: those are what turn a cited id into a link
+    the reader can check, and resolving them only through the graph meant a stale
+    projection silently produced an answer whose citations went nowhere.
 
     Graph rows win where they exist, because they carry the edges Postgres cannot.
     """
@@ -132,53 +91,34 @@ async def resolve(speech_ids: list[str]) -> list[dict]:
 
     missing = [sid for sid in speech_ids if sid not in found]
     if missing:
-        for sql in (RESOLVE_UTTERANCES_SQL, RESOLVE_RADIO_SQL):
-            if not missing:
-                break
-            try:
-                rows = await db.fetch(sql, missing)
-            except Exception:
-                continue
-            for r in rows:
-                found[r["speech_id"]] = {**dict(r), "laps": [], "mentions": []}
-            missing = [sid for sid in missing if sid not in found]
+        try:
+            rows = await db.fetch(RESOLVE_UTTERANCES_SQL, missing)
+        except Exception:
+            rows = []
+        for r in rows:
+            found[r["speech_id"]] = {**dict(r), "mentions": [], "topics": []}
 
     return [found[sid] for sid in speech_ids if sid in found]
 
 
-def _tone_phrase(row: dict) -> str:
-    """Tone and sentiment, phrased as readings rather than facts.
-
-    worker/worker/audio/tone.py is a threshold heuristic over acoustic features, not a
-    trained speech-emotion model, and the pipeline stores the text and acoustic reads
-    separately precisely so they can disagree. Both of those get flattened into a
-    confident-sounding assertion the moment this is worded as 'he was stressed', so the
-    hedging lives here — in the one place every consumer, UI or model, reads through."""
-    parts = []
-    if row.get("mood"):
-        parts.append(f"voice reads {row['mood']}")
-    if row.get("sentiment"):
-        score = row.get("sentiment_score")
-        s = f"words read {row['sentiment']}"
-        if score is not None:
-            s += f" ({score:+.2f})"
-        parts.append(s)
-    # Surface disagreement rather than averaging it away -- a calm-sounding delivery of
-    # negative words is a signal, and it is exactly what a single fused number destroys.
-    text_s, fused = row.get("text_sentiment"), row.get("sentiment")
-    if text_s and fused and text_s != fused:
-        parts.append(f"text alone reads {text_s}")
-    return ", ".join(parts)
+def _clock(seconds) -> str:
+    """Offset into a clip as m:ss -- the form a reader scrubs an audio player by."""
+    s = int(seconds)
+    return f"{s // 60}:{s % 60:02d}"
 
 
-def _lap_phrase(lap: dict) -> str:
-    """One lap, with its delta to the previous lap — the comparison that makes a lap time
-    mean anything without the reader having to hold the whole timing sheet in their head."""
-    out = f"lap {lap['number']}"
-    if lap.get("duration_s") is not None:
-        out += f": {lap['duration_s']:.1f}s"
-        if lap.get("prev_s") is not None:
-            out += f" ({lap['duration_s'] - lap['prev_s']:+.1f}s vs previous)"
+def _clip_phrase(row: dict) -> str:
+    """Which recording a piece of speech is in.
+
+    Most of a corpus is uploaded clips -- a meeting, a podcast, an interview -- and the
+    filename is often the only statement of what a clip *is about* ("The Decline of
+    Dunzo... Startup Case Study"). A model that cannot see it has no way to connect a quote
+    to its subject or to tell two recordings apart when it summarises."""
+    if not row.get("filename"):
+        return ""
+    out = f'clip "{row["filename"]}"'
+    if row.get("start_s") is not None:
+        out += f" at {_clock(row['start_s'])}"
     return out
 
 
@@ -190,43 +130,23 @@ def render_context(rows: list[dict], max_chars: int | None = None) -> str:
     checked."""
     blocks: list[str] = []
     for r in rows:
-        head_bits = []
-        if r.get("session"):
-            head_bits.append(" ".join(str(b) for b in (r.get("session"), r.get("year")) if b))
-        elif r.get("circuit"):
-            head_bits.append(r["circuit"])
-        who = r.get("driver") or r.get("speaker") or "unidentified speaker"
-        if r.get("team"):
-            who += f" ({r['team']})"
-        head_bits.append(who)
-
+        head_bits = [_clip_phrase(r), r.get("speaker") or "unidentified speaker"]
         lines = [f"[{r['speech_id']}] " + " | ".join(b for b in head_bits if b)]
-        tone = _tone_phrase(r)
-        if tone:
-            lines.append(f"  tone: {tone}")
         if r.get("text"):
             lines.append(f'  "{r["text"].strip()}"')
-        for lap in r.get("laps") or []:
-            lines.append(f"  {_lap_phrase(lap)}")
-        # Hedged like tone, and for the same reason: a classifier read one sentence of
-        # ASR output. The score rides along so a reader can weigh it rather than take it.
-        for ev in r.get("events") or []:
-            if not ev.get("type"):
-                continue
-            target = next((t["driver"] for t in (r.get("event_targets") or [])
-                           if t.get("driver") and t.get("event_type") == ev["type"]), None)
-            reads = ONTRACK_READS.get(ev["type"], ev["type"].replace("_", " "))
-            lines.append(f"  on track: reads as {reads}"
-                         + (f", involving {target}" if target else "")
-                         + f" ({float(ev.get('score') or 0):.2f})")
         mentions = [m for m in (r.get("mentions") or []) if m.get("name")]
         if mentions:
-            lines.append("  mentions: "
-                         + ", ".join(f"{m['name']} ({str(m['kind']).lower()})" for m in mentions))
+            lines.append("  names: " + ", ".join(
+                f"{m['name']} ({m['kind']})" if m.get("kind") and m["kind"] != "name"
+                else m["name"] for m in mentions))
+        if r.get("topics"):
+            lines.append("  recording topics: " + ", ".join(r["topics"]))
         if r.get("prev_text"):
-            lines.append(f'  before: "{r["prev_text"].strip()}"')
+            who = f" ({r['prev_speaker']})" if r.get("prev_speaker") else ""
+            lines.append(f'  before{who}: "{r["prev_text"].strip()}"')
         if r.get("next_text"):
-            lines.append(f'  after: "{r["next_text"].strip()}"')
+            who = f" ({r['next_speaker']})" if r.get("next_speaker") else ""
+            lines.append(f'  after{who}: "{r["next_text"].strip()}"')
         blocks.append("\n".join(lines))
 
     out = "\n\n".join(blocks)
@@ -244,7 +164,30 @@ def render_context(rows: list[dict], max_chars: int | None = None) -> str:
     return out
 
 
-def render_brief(rows: list[dict], max_text: int = 160) -> str:
+def _snippet(text: str, max_text: int, terms: list[str] | None = None) -> str:
+    """At most `max_text` characters of `text`, windowed on the first query term.
+
+    Uploaded clips diarize into long turns -- a podcast monologue runs to a thousand
+    characters per utterance -- and the opening 160 are often not the part that matched.
+    Observed: asked who founded Dunzo, the search for "Kabir" returned the line that names
+    him, clipped before the surname, and the model supplied one of its own. Showing the
+    window around the match is what puts the matched words in front of the reader."""
+    text = " ".join((text or "").split())
+    if len(text) <= max_text:
+        return text
+    low = text.lower()
+    hits = [p for p in (low.find(t.lower()) for t in terms or []) if p >= 0]
+    start = max(0, min(hits) - max_text // 3) if hits else 0
+    # Start on a word boundary so the window does not open mid-word.
+    if start:
+        start = text.find(" ", start) + 1 or start
+    end = start + max_text - (1 if start else 0) - 1
+    out = text[start:end].rstrip()
+    return ("…" if start else "") + out + ("…" if end < len(text) else "")
+
+
+def render_brief(rows: list[dict], max_text: int = 160,
+                 terms: list[str] | None = None) -> str:
     """One line per search hit: id, who said it, where, and a clipped quote.
 
     Deliberately thinner than render_context - search is for choosing what to look at,
@@ -253,82 +196,88 @@ def render_brief(rows: list[dict], max_text: int = 160) -> str:
 
     The speaker is the one piece of context that belongs here rather than behind an
     expand call. Without it a question of the form "what did X say" is unanswerable from
-    search output: every hit looks equally plausible. Observed against real models - they
-    picked the first result and answered from it, citing an utterance that merely
-    *mentioned* the driver rather than one he spoke. It costs a few tokens a line and
-    closes the most common way this retrieves the wrong thing."""
+    search output: every hit looks equally plausible.
+
+    `terms` are the query's words; when given, a long quote is windowed on the first of
+    them rather than cut from the start (see _snippet)."""
     lines = []
     for r in rows:
-        text = " ".join((r.get("text") or "").split())
-        if len(text) > max_text:
-            text = text[:max_text - 1].rstrip() + "…"
-        who = r.get("driver") or r.get("speaker") or "unidentified speaker"
-        where = f", {r['session']}" if r.get("session") else ""
-        laps = r.get("laps") or []
-        lap = f", lap {laps[0]['number']}" if laps and laps[0].get("number") is not None else ""
-        # The tone reading rides along on the search line, hedged the same way it is
-        # everywhere else. Without it a tone-filtered search returns hits that look like
-        # plain quotes, and the model reports them with the qualifier dropped.
-        tone = f", voice reads {r['mood']}" if r.get("mood") else ""
-        lines.append(f'[{r["speech_id"]}] {who}{where}{lap}{tone}: "{text}"')
+        text = _snippet(r.get("text") or "", max_text, terms)
+        who = r.get("speaker") or "unidentified speaker"
+        where = f", {_clip_phrase(r)}" if _clip_phrase(r) else ""
+        lines.append(f'[{r["speech_id"]}] {who}{where}: "{text}"')
     return chr(10).join(lines)
 
 
-DRIVER_LAPS_CYPHER = """
-MATCH (l:Lap {session_key: $session_key, driver_number: $driver_number})
-OPTIONAL MATCH (sp:Speech)-[:DURING_LAP]->(l)
-WITH l, collect(DISTINCT CASE WHEN sp IS NULL THEN null ELSE {
-       speech_id: sp.speech_id, text: sp.text, mood: sp.mood, sentiment: sp.sentiment
-     } END) AS speech
-WHERE ($from_lap IS NULL OR l.number >= $from_lap)
-  AND ($to_lap   IS NULL OR l.number <= $to_lap)
-RETURN l.number AS number, l.duration_s AS duration_s, l.is_pit_out AS is_pit_out, speech
-ORDER BY l.number
+# --------------------------------------------------------------------------- the map
+
+# Utterances are left out: a corpus of a few hours is thousands of lines, which is a
+# hairball, not a map. Everything they connect is still drawn, through the aggregate edges
+# (APPEARS_IN, MENTIONED, CLIP MENTIONS) the projection derives from them.
+MAP_NODES_CYPHER = """
+MATCH (n) WHERE NOT n:Utterance
+WITH n, [l IN labels(n) WHERE l <> 'Speech'][0] AS label
+RETURN elementId(n) AS id, label,
+       coalesce(n.name, n.filename, n.code) AS name,
+       coalesce(n.profile_id, n.clip_id, n.cluster_id) AS ref,
+       n {.status, .n_enrollments, .total_speech_s, .duration_s, .language, .n_speakers,
+          .needs_review, .quality, .kind, .n_mentions, .n_members, .notes, .tags} AS props,
+       COUNT { (n)--(m) WHERE NOT m:Utterance } AS degree
+ORDER BY degree DESC
+LIMIT $limit
+"""
+
+MAP_LINKS_CYPHER = """
+MATCH (a)-[r]->(b)
+WHERE elementId(a) IN $ids AND elementId(b) IN $ids
+RETURN elementId(a) AS source, elementId(b) AS target, type(r) AS type,
+       coalesce(r.n_clips, r.n, r.speech_s, 1) AS weight
 """
 
 
-async def driver_laps(session_key: int, driver_number: int,
-                      from_lap: int | None = None, to_lap: int | None = None) -> list[dict]:
-    return await graph.run(DRIVER_LAPS_CYPHER, session_key=session_key,
-                           driver_number=driver_number, from_lap=from_lap, to_lap=to_lap)
+def _plain(v):
+    """Neo4j temporal and list values -> JSON-safe."""
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    if isinstance(v, list):
+        return [_plain(x) for x in v]
+    return str(v)
 
 
-def render_timeline(laps: list[dict], from_lap: int | None = None,
-                    to_lap: int | None = None) -> str:
-    """A driver's session as lap times with the speech that landed on each lap.
+async def corpus_map(limit: int = 600) -> dict:
+    """Nodes and links for the Graph page, best-connected first when capped."""
+    nodes = await graph.run(MAP_NODES_CYPHER, limit=min(max(limit, 10), 3000))
+    ids = [n["id"] for n in nodes]
+    links = await graph.run(MAP_LINKS_CYPHER, ids=ids) if ids else []
+    return {
+        "nodes": [{**n, "props": {k: _plain(v) for k, v in (n["props"] or {}).items()
+                                  if v is not None}} for n in nodes],
+        "links": [{**l, "weight": float(l["weight"] or 1)} for l in links],
+    }
 
-    With no explicit range, only laps carrying speech are listed. A full race is 50-70 laps
-    and most of them are silent; printing them all buries the handful that matter and costs
-    the reader (or the context window) far more than it informs. The pace summary is what
-    keeps the surviving laps interpretable without the rest."""
-    if not laps:
-        return ""
-    timed = [l["duration_s"] for l in laps if l.get("duration_s") is not None]
-    header = f"{len(laps)} laps"
-    if timed:
-        fastest = min(timed)
-        header += (f" | fastest {fastest:.1f}s"
-                   f" | median {sorted(timed)[len(timed) // 2]:.1f}s"
-                   f" | slowest {max(timed):.1f}s")
 
-    explicit_range = from_lap is not None or to_lap is not None
-    shown = laps if explicit_range else [l for l in laps if l.get("speech")]
-    if not shown:
-        return header + "\n  (no radio landed on any lap in this session)"
+NEIGHBOURHOOD_CYPHER = """
+MATCH (n) WHERE elementId(n) = $id
+OPTIONAL MATCH (n)-[r]-(m) WHERE NOT m:Utterance
+WITH n, r, m ORDER BY coalesce(r.n_clips, r.n, r.speech_s, 1) DESC
+WITH n, collect(CASE WHEN m IS NULL THEN null ELSE {
+       id: elementId(m), label: [l IN labels(m) WHERE l <> 'Speech'][0],
+       name: coalesce(m.name, m.filename, m.code),
+       ref: coalesce(m.profile_id, m.clip_id, m.cluster_id),
+       type: type(r), outgoing: startNode(r) = n,
+       weight: coalesce(r.n_clips, r.n, r.speech_s, 1)
+     } END)[..60] AS neighbours
+OPTIONAL MATCH (u:Utterance)-[:SPOKEN_BY|IN_CLIP|MENTIONS]->(n)
+WITH n, neighbours, u ORDER BY u.start_s
+WITH n, neighbours, collect(u {.speech_id, .text, .start_s})[..5] AS lines
+RETURN neighbours, lines
+"""
 
-    prev_by_number = {l["number"]: l.get("duration_s") for l in laps}
-    lines = [header]
-    for l in shown:
-        line = f"  lap {l['number']}"
-        if l.get("duration_s") is not None:
-            line += f": {l['duration_s']:.1f}s"
-            prev = prev_by_number.get(l["number"] - 1)
-            if prev is not None:
-                line += f" ({l['duration_s'] - prev:+.1f}s)"
-        if l.get("is_pit_out"):
-            line += " [out of pits]"
-        lines.append(line)
-        for s in l.get("speech") or []:
-            tone = f" ({s['mood']})" if s.get("mood") else ""
-            lines.append(f'    [{s["speech_id"]}]{tone} "{" ".join((s.get("text") or "").split())}"')
-    return "\n".join(lines)
+
+async def neighbourhood(node_id: str) -> dict:
+    rows = await graph.run(NEIGHBOURHOOD_CYPHER, id=node_id)
+    if not rows:
+        return {"neighbours": [], "lines": []}
+    r = rows[0]
+    return {"neighbours": [{**m, "weight": float(m["weight"] or 1)} for m in r["neighbours"]],
+            "lines": r["lines"]}

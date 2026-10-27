@@ -21,17 +21,14 @@ models:
       - pyannote/wespeaker-voxceleb-resnet34-LM
 
   embedding:
-    id: speechbrain/spkrec-ecapa-voxceleb
+    # WeSpeaker ResNet293 (CC-BY-4.0). Loaded through pyannote's own WeSpeaker classes, so
+    # only the checkpoint and its config are needed. Why it replaced ECAPA:
+    # worker/worker/speaker_models.py. ECAPA stays selectable from Settings > Models.
+    id: Wespeaker/wespeaker-voxceleb-resnet293-LM
     revision: main
-    local_dir: /models/embed/ecapa
-    dim: 192
+    local_dir: /models/embed/wespeaker-resnet293
+    dim: 256
     purpose: Speaker verification embeddings
-    # ecapa's own hyperparams.yaml hardcodes `pretrained_path: speechbrain/spkrec-ecapa-voxceleb`
-    # for its sub-checkpoints — speechbrain resolves those via hf_hub_download using that repo
-    # id regardless of the local `source` override, so (like pyannote's segmentation submodel)
-    # it needs to exist in the standard HF cache too, not just this flat local_dir copy.
-    depends_on:
-      - speechbrain/spkrec-ecapa-voxceleb
 
   text_embedding:
     id: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2

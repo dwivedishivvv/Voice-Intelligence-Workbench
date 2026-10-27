@@ -42,10 +42,10 @@ def _has_weights(d: Path) -> bool:
 def _model_path(category: str, dir_name: str) -> Path:
     cfg = get_settings()
     # explicit map rather than an if-chain with a catch-all `else "text"`: that shape
-    # silently filed every new category under text/ (which is exactly what happened to
-    # sentiment), so an unknown category should raise here instead of guessing wrong.
+    # silently filed every new category under text/, so an unknown category should raise
+    # here instead of guessing wrong.
     sub = {"diarization": "diar", "asr": "asr", "embedding": "embed",
-           "text_embedding": "text", "sentiment": "sentiment"}[category]
+           "text_embedding": "text"}[category]
     return Path(cfg.model_dir) / sub / dir_name
 
 

@@ -1,4 +1,4 @@
-"""db/init.sql only ever runs on a *fresh* postgres volume, so races.sql and f1.sql are
+"""db/init.sql only ever runs on a *fresh* postgres volume, so the files in REPLAYABLE are
 written to be replayable against a live database instead. Nothing enforces that at
 runtime: a non-idempotent statement slipped into either file works fine on a fresh
 volume and only fails much later, on someone's populated database, during the replay
@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from common.schema import REPLAYABLE
+
 DB_DIR = Path(__file__).resolve().parents[2] / "db"
-REPLAYABLE = ["races.sql", "f1.sql", "ontrack.sql", "speaker_quality.sql"]
 
 
 def _statements(name: str) -> list[str]:
@@ -45,3 +46,11 @@ def test_init_includes_every_replayable_file(name):
     includes = re.findall(r"^\s*\\ir?\s+(\S+)", init, re.MULTILINE)
     assert any(inc.rsplit("/", 1)[-1] == name for inc in includes), (
         f"{name} is never included by init.sql; found includes: {includes}")
+
+
+def test_every_included_file_is_replayed_at_startup():
+    """The reverse direction: a file init.sql includes but common/schema.py does not list
+    reaches fresh volumes only, and an existing database silently never gets it."""
+    init = (DB_DIR / "init.sql").read_text()
+    included = [inc.rsplit("/", 1)[-1] for inc in re.findall(r"^\s*\\ir?\s+(\S+)", init, re.MULTILINE)]
+    assert included == REPLAYABLE
